@@ -34,10 +34,6 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
     <!-- PDF.js CDN -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-    <!-- Marked.js CDN for Markdown rendering -->
-    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
-    <!-- DOMPurify: OCR/AI 결과를 HTML로 렌더링하기 전 정화 -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
     <!-- Tesseract.js CDN (브라우저 로컬 OCR 엔진) -->
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 
@@ -156,143 +152,20 @@
             window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
         }
 
-        const GEMINI_MODELS = [
-            "gemini-3-flash-preview",
-            "gemini-2.5-flash",
-            "gemini-2.0-flash"
-        ];
-
-        // Gemini가 저작물 재현(RECITATION) 정책으로 응답을 막은 경우를 구분하기 위한 오류 타입
-        class RecitationBlockedError extends Error {
-            constructor() {
-                super("Gemini가 저작물 재현 방지 정책(RECITATION)으로 이 페이지의 응답을 차단했습니다.");
-                this.name = 'RecitationBlockedError';
-            }
-        }
-
-        async function callGemini({ apiKey, parts }) {
-            let lastErrorMessage = "";
-
-            for (const modelName of GEMINI_MODELS) {
-                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
-                let response, responseData;
-                try {
-                    response = await fetch(apiUrl, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'x-goog-api-key': apiKey
-                        },
-                        body: JSON.stringify({ contents: [{ role: "user", parts }] })
-                    });
-                    responseData = await response.json().catch(() => ({}));
-                } catch (err) {
-                    lastErrorMessage = err.message || "네트워크 통신 오류가 발생했습니다.";
-                    continue;
-                }
-
-                if (!response.ok) {
-                    const apiErrorMsg = responseData?.error?.message || responseData?.error?.status || `HTTP ${response.status}`;
-                    if (response.status === 401 || response.status === 403 ||
-                        (response.status === 400 && /api key/i.test(apiErrorMsg))) {
-                        throw new Error("Gemini API 키가 올바르지 않거나 권한이 없습니다. [🔑 API 키 설정]에서 확인해주세요.");
-                    }
-                    lastErrorMessage = `API 오류 (${modelName}, ${response.status}): ${apiErrorMsg}`;
-                    continue;
-                }
-
-                const candidate = responseData?.candidates?.[0];
-                const text = candidate?.content?.parts?.map(p => p.text || '').join('');
-
-                if (text && text.trim().length > 0) {
-                    return text;
-                }
-                // 정책 차단은 다른 모델로 다시 보내도 같은 결과이므로 바로 알린다
-                if (candidate?.finishReason === 'RECITATION') {
-                    throw new RecitationBlockedError();
-                }
-                if (candidate?.finishReason === 'SAFETY' || responseData?.promptFeedback?.blockReason) {
-                    throw new Error("안전성(Safety) 정책에 의해 해당 이미지 스캔이 차단되었습니다.");
-                }
-                lastErrorMessage = "응답은 성공했으나 이미지에서 추출된 텍스트 내용이 없습니다.";
-            }
-
-            throw new Error(lastErrorMessage || "Gemini 요청에 실패했습니다.");
-        }
-
-        async function runSingleGeminiOCR({ base64Image, mimeType, mode, targetLang, customInstruction, removeBookHeaderFooter, includePageDelimiter, apiKey }) {
-            if (!apiKey || !apiKey.trim()) {
-                throw new Error("Gemini API 키가 설정되지 않았습니다. 상단 [🔑 API 키 설정] 메뉴에서 Google Gemini API 키를 먼저 입력하세요.");
-            }
-
-            let cleanBase64 = base64Image;
-            let extractedMime = mimeType || "image/jpeg";
-
-            if (base64Image.includes(';base64,')) {
-                const parts = base64Image.split(';base64,');
-                const mimeMatch = parts[0].match(/data:(.*?)$/);
-                if (mimeMatch) extractedMime = mimeMatch[1];
-                cleanBase64 = parts[1];
-            }
-
-            let promptText;
-            switch (mode) {
-                case 'markdown':
-                    promptText = "Transcribe all visible characters into structured Markdown with headings, paragraphs, and tables. Do not omit words.";
-                    break;
-                case 'plain':
-                    promptText = "Extract all text line-by-line into clear text format.";
-                    break;
-                case 'table':
-                    promptText = "Extract all tabular data or tables in this image into clean Markdown tables.";
-                    break;
-                case 'translate':
-                    promptText = `Extract text and translate into ${targetLang}. Show 1. Original 2. Translation.`;
-                    break;
-                case 'keyvalue':
-                    promptText = "Extract document key-value pairs as valid JSON.";
-                    break;
-                case 'handwriting':
-                    promptText = "Transcribe handwritten or complex book layout text precisely.";
-                    break;
-                default:
-                    promptText = "Extract all visible characters from this document page image.";
-            }
-
-            if (removeBookHeaderFooter) {
-                promptText += "\n\nBOOK SCAN RULE: Omit running headers, running chapter titles, and bottom margin text. Extract only the main body text.";
-            }
-
-            if (includePageDelimiter) {
-                promptText += "\n\nPRINTED PAGE DETECTOR: Check if an actual printed page number exists on this page image (e.g. '124' or '45'). If visible, start your response with a single header line: '<page [Printed Page Number]>'. If NO page number is printed or visible, DO NOT include any '<page ...>' header at all.";
-            }
-
-            if (customInstruction && customInstruction.trim() !== '') {
-                promptText += `\nAdditional Instruction: ${customInstruction}`;
-            }
-
-            return callGemini({
-                apiKey: apiKey.trim(),
-                parts: [
-                    { text: promptText },
-                    { inlineData: { mimeType: extractedMime, data: cleanBase64 } }
-                ]
-            });
-        }
-
         // Tesseract worker는 언어 데이터 로딩 비용이 크므로 배치 하나에서 재사용한다
         async function createTesseractWorker(onProgress) {
             if (!window.Tesseract) {
                 throw new Error("Tesseract.js 라이브러리가 로드되지 않았습니다. 인터넷 연결을 확인하거나 다시 시도해 주세요.");
             }
             const progressRef = { current: onProgress };
-            const worker = await window.Tesseract.createWorker('kor+eng', 1, {
+            const worker = await window.Tesseract.createWorker('eng', 1, {
                 logger: m => {
                     if (m.status === 'recognizing text' && progressRef.current) {
                         progressRef.current(Math.round(m.progress * 100));
                     }
                 }
             });
+            await worker.setParameters({ user_defined_dpi: '300' });
             worker._progressRef = progressRef;
             return worker;
         }
@@ -322,14 +195,14 @@
             });
         }
 
-        // OCR 결과는 이미지 속 글자나 AI 응답에서 오므로 스크립트가 섞여 있을 수 있다
-        function renderMarkdownSafely(markdown) {
-            if (!window.marked || !window.DOMPurify) {
-                const div = document.createElement('div');
-                div.textContent = markdown;
-                return `<pre class="whitespace-pre-wrap">${div.innerHTML}</pre>`;
-            }
-            return window.DOMPurify.sanitize(window.marked.parse(markdown));
+        // 책의 줄바꿈(시각적 줄)을 문단 단위로 합친다. 줄 끝 하이픈 분리 단어도 이어 붙인다.
+        function reflowParagraphs(text) {
+            return text
+                .replace(/(\w)-\n(\w)/g, '$1$2')
+                .split(/\n{2,}/)
+                .map(par => par.replace(/\s*\n\s*/g, ' ').trim())
+                .filter(Boolean)
+                .join('\n\n');
         }
 
         function applyImageFilters(imgElement, filters) {
@@ -365,13 +238,89 @@
             return canvas.toDataURL('image/jpeg', 0.95);
         }
 
-        function App() {
-            const [apiKey, setApiKey] = React.useState(() => localStorage.getItem('gemini_api_key') || '');
-            const [isApiKeyModalOpen, setIsApiKeyModalOpen] = React.useState(false);
-            const [tempApiKeyInput, setTempApiKeyInput] = React.useState('');
 
-            // Engine Selection: 'gemini' (AI 서식 인식) | 'tesseract' (로컬 오프라인)
-            const [ocrEngine, setOcrEngine] = React.useState('gemini');
+        // 사용자가 지정한 제외 영역(비율 좌표)을 흰색으로 덮는다. 삽화 속 글자가 OCR에 섞이는 것을 막는다.
+        async function applyMaskRects(dataUrl, rects) {
+            if (!rects || rects.length === 0) return dataUrl;
+            const image = await loadImage(dataUrl);
+            const canvas = document.createElement('canvas');
+            canvas.width = image.naturalWidth;
+            canvas.height = image.naturalHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(image, 0, 0);
+            ctx.fillStyle = '#ffffff';
+            rects.forEach(r => {
+                ctx.fillRect(
+                    Math.floor(r.x * canvas.width), Math.floor(r.y * canvas.height),
+                    Math.ceil(r.w * canvas.width), Math.ceil(r.h * canvas.height)
+                );
+            });
+            return canvas.toDataURL('image/jpeg', 0.95);
+        }
+
+        // 미리보기 위에서 드래그로 제외 영역을 그리는 편집기
+        function MaskEditor({ src, rects, onChange }) {
+            const boxRef = React.useRef(null);
+            const [draft, setDraft] = React.useState(null);
+
+            const toRatio = (e) => {
+                const b = boxRef.current.getBoundingClientRect();
+                return {
+                    x: Math.min(1, Math.max(0, (e.clientX - b.left) / b.width)),
+                    y: Math.min(1, Math.max(0, (e.clientY - b.top) / b.height))
+                };
+            };
+            const toRect = (a, b) => ({
+                x: Math.min(a.x, b.x), y: Math.min(a.y, b.y),
+                w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y)
+            });
+
+            const onDown = (e) => {
+                if (e.target.dataset.del) return;
+                e.currentTarget.setPointerCapture(e.pointerId);
+                const p = toRatio(e);
+                setDraft({ start: p, rect: toRect(p, p) });
+            };
+            const onMove = (e) => {
+                if (!draft) return;
+                setDraft(d => ({ ...d, rect: toRect(d.start, toRatio(e)) }));
+            };
+            const onUp = () => {
+                if (!draft) return;
+                if (draft.rect.w > 0.01 && draft.rect.h > 0.01) onChange([...rects, draft.rect]);
+                setDraft(null);
+            };
+
+            const boxStyle = (r) => ({
+                left: `${r.x * 100}%`, top: `${r.y * 100}%`,
+                width: `${r.w * 100}%`, height: `${r.h * 100}%`
+            });
+
+            return (
+                <div
+                    ref={boxRef}
+                    className="relative select-none rounded-lg overflow-hidden border border-slate-700 bg-white"
+                    style={{ touchAction: 'none', cursor: 'crosshair' }}
+                    onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
+                >
+                    <img src={src} alt="영역 편집" draggable="false" className="block w-full h-auto pointer-events-none" />
+                    {rects.map((r, i) => (
+                        <div key={i} style={boxStyle(r)} className="absolute bg-red-500/30 border-2 border-red-500">
+                            <button
+                                data-del="1"
+                                onClick={() => onChange(rects.filter((_, j) => j !== i))}
+                                className="absolute -top-0.5 -right-0.5 w-5 h-5 text-[11px] leading-5 text-center bg-red-600 text-white rounded-bl cursor-pointer"
+                                title="이 영역 삭제"
+                            >×</button>
+                        </div>
+                    ))}
+                    {draft && <div style={boxStyle(draft.rect)} className="absolute bg-red-500/20 border-2 border-dashed border-red-500" />}
+                </div>
+            );
+        }
+
+        function App() {
+            const [reflowText, setReflowText] = React.useState(true);
 
             const [pages, setPages] = React.useState([]);
             const [selectedPageIndex, setSelectedPageIndex] = React.useState(0);
@@ -386,25 +335,12 @@
 
             const [thumbnailLayout, setThumbnailLayout] = React.useState('carousel');
 
-            const [ocrMode, setOcrMode] = React.useState('markdown');
-            const [targetLang, setTargetLang] = React.useState('Korean');
-            const [customInstruction, setCustomInstruction] = React.useState('');
-            const [removeBookHeaderFooter, setRemoveBookHeaderFooter] = React.useState(true);
-            const [includePageDelimiter, setIncludePageDelimiter] = React.useState(true);
-            const [fallbackToTesseract, setFallbackToTesseract] = React.useState(true);
-
             const [isLoading, setIsLoading] = React.useState(false);
             const [progressStatus, setProgressStatus] = React.useState({ current: 0, total: 0, detail: '' });
             const [ocrResult, setOcrResult] = React.useState('');
-            const [activeResultTab, setActiveResultTab] = React.useState('formatted');
-            
             const [history, setHistory] = React.useState([]);
             const [isHistoryOpen, setIsHistoryOpen] = React.useState(false);
             const [toast, setToast] = React.useState(null);
-
-            const [chatInput, setChatInput] = React.useState('');
-            const [chatMessages, setChatMessages] = React.useState([]);
-            const [isChatLoading, setIsChatLoading] = React.useState(false);
 
             const [isSpeaking, setIsSpeaking] = React.useState(false);
 
@@ -562,67 +498,37 @@
                 setOcrResult('');
 
                 let fullCombinedResult = '';
-                const fallbackPages = [];
                 let tesseractWorker = null;
-                const getTesseractWorker = async () => {
-                    if (!tesseractWorker) tesseractWorker = await createTesseractWorker();
-                    return tesseractWorker;
-                };
 
                 try {
+                    tesseractWorker = await createTesseractWorker();
+
                     for (let idx = 0; idx < pages.length; idx++) {
                         const pageObj = pages[idx];
                         const setDetail = (detail) => setProgressStatus({ current: idx + 1, total: pages.length, detail });
-                        setDetail(`${ocrEngine.toUpperCase()} 스캔 중...`);
+                        setDetail('스캔 중...');
 
-                        // 미리보기에서 선택하지 않은 페이지에도 현재 보정 필터를 동일하게 적용
-                        const imageSrc = applyImageFilters(await loadImage(pageObj.rawSrc), filters);
-                        const runTesseract = async () => runSingleTesseractOCR({
-                            worker: await getTesseractWorker(),
+                        // 선택하지 않은 페이지에도 보정 필터와 제외 영역을 동일하게 적용
+                        const imageSrc = await applyMaskRects(
+                            applyImageFilters(await loadImage(pageObj.rawSrc), filters),
+                            pageObj.masks
+                        );
+                        const pageText = await runSingleTesseractOCR({
+                            worker: tesseractWorker,
                             base64Image: imageSrc,
-                            onProgress: (pct) => setDetail(`로컬 Tesseract 인식 진행률: ${pct}%`)
+                            onProgress: (pct) => setDetail(`인식 진행률: ${pct}%`)
                         });
 
-                        let pageText = '';
-
-                        if (ocrEngine === 'gemini') {
-                            try {
-                                pageText = await runSingleGeminiOCR({
-                                    base64Image: imageSrc,
-                                    mimeType: 'image/jpeg',
-                                    mode: ocrMode,
-                                    targetLang: targetLang,
-                                    customInstruction: customInstruction,
-                                    removeBookHeaderFooter: removeBookHeaderFooter,
-                                    includePageDelimiter: includePageDelimiter,
-                                    apiKey: apiKey
-                                });
-                            } catch (err) {
-                                if (!(err instanceof RecitationBlockedError) || !fallbackToTesseract) throw err;
-                                // 차단 정책을 우회하지 않고, 해당 페이지만 내 PC의 로컬 엔진으로 직접 인식
-                                fallbackPages.push(idx + 1);
-                                pageText = await runTesseract();
-                            }
-                        } else if (ocrEngine === 'tesseract') {
-                            pageText = await runTesseract();
-                        }
-
-                        fullCombinedResult += pageText.trim() + '\n\n';
+                        fullCombinedResult += (reflowText ? reflowParagraphs(pageText) : pageText.trim()) + '\n\n';
                         setOcrResult(fullCombinedResult.trim());
                     }
 
-                    setActiveResultTab(ocrMode === 'keyvalue' ? 'raw' : 'formatted');
-                    if (fallbackPages.length > 0) {
-                        showToast(`스캔 완료. ${fallbackPages.join(', ')}페이지는 Gemini 정책 차단으로 로컬 Tesseract로 인식했습니다.`, 'info');
-                    } else {
-                        showToast(`스캔 완료! [${ocrEngine.toUpperCase()} 엔진 사용]`, 'success');
-                    }
+                    showToast('스캔 완료!', 'success');
 
                     const historyItem = {
                         id: Date.now(),
-                        title: `[${ocrEngine.toUpperCase()}] ${pages.length}개 페이지 스캔 (${new Date().toLocaleTimeString()})`,
+                        title: `${pages.length}개 페이지 스캔 (${new Date().toLocaleTimeString()})`,
                         timestamp: new Date().toLocaleString(),
-                        engine: ocrEngine,
                         snippet: fullCombinedResult.slice(0, 120) + '...',
                         result: fullCombinedResult,
                     };
@@ -637,14 +543,30 @@
 
                 } catch (err) {
                     console.error(err);
-                    if (err instanceof RecitationBlockedError) {
-                        showToast(`${err.message} '정책으로 차단한 페이지는 로컬 Tesseract로 인식' 옵션을 켜거나 로컬 Tesseract 엔진을 선택하세요.`, 'error');
-                    } else {
-                        showToast(err.message || 'OCR 처리 중 오류가 발생했습니다.', 'error');
-                    }
+                    showToast(err.message || 'OCR 처리 중 오류가 발생했습니다.', 'error');
                 } finally {
                     if (tesseractWorker) await tesseractWorker.terminate().catch(() => {});
                     setIsLoading(false);
+                }
+            };
+
+            const setPageMasks = (index, masks) => {
+                setPages(prev => prev.map((p, i) => (i === index ? { ...p, masks } : p)));
+            };
+
+            const applyMasksToAllPages = () => {
+                const masks = pages[selectedPageIndex]?.masks || [];
+                setPages(prev => prev.map(p => ({ ...p, masks: masks.map(m => ({ ...m })) })));
+                showToast(`제외 영역 ${masks.length}개를 모든 페이지에 적용했습니다.`, 'success');
+            };
+
+            const rotatePages = () => {
+                // 제외 영역은 회전된 이미지 기준 좌표이므로 회전하면 위치가 맞지 않게 된다
+                const hadMasks = pages.some(p => p.masks && p.masks.length > 0);
+                setFilters(f => ({ ...f, rotation: (f.rotation + 90) % 360 }));
+                if (hadMasks) {
+                    setPages(prev => prev.map(p => ({ ...p, masks: [] })));
+                    showToast('회전하면 제외 영역 위치가 달라져 모두 초기화됩니다.', 'info');
                 }
             };
 
@@ -654,14 +576,6 @@
                 if (index < selectedPageIndex || selectedPageIndex >= remaining) {
                     setSelectedPageIndex(Math.max(0, Math.min(selectedPageIndex - 1, remaining - 1)));
                 }
-            };
-
-            const handleSaveApiKey = () => {
-                const cleanGeminiKey = tempApiKeyInput.trim();
-                setApiKey(cleanGeminiKey);
-                localStorage.setItem('gemini_api_key', cleanGeminiKey);
-                setIsApiKeyModalOpen(false);
-                showToast('Gemini API 키가 저장되었습니다.', 'success');
             };
 
             const handleToggleTTS = () => {
@@ -713,14 +627,10 @@
                 }
             };
 
-            const handleDownload = (format) => {
+            const handleDownload = () => {
                 if (!ocrResult) return;
-                let mime = 'text/plain';
-                let ext = 'txt';
-                if (format === 'md') {
-                    ext = 'md';
-                    mime = 'text/markdown';
-                }
+                const mime = 'text/plain';
+                const ext = 'txt';
 
                 const blob = new Blob([ocrResult], { type: `${mime};charset=utf-8` });
                 const url = URL.createObjectURL(blob);
@@ -732,31 +642,6 @@
                 document.body.removeChild(link);
                 URL.revokeObjectURL(url);
                 showToast(`${ext.toUpperCase()} 파일로 다운로드되었습니다.`, 'success');
-            };
-
-            const handleSendChatMessage = async () => {
-                if (!chatInput.trim() || !ocrResult) return;
-                if (!apiKey || !apiKey.trim()) {
-                    showToast("질문 기능은 Gemini API 키 설정이 필요합니다. [🔑 API 키 설정]에서 등록해주세요.", "error");
-                    return;
-                }
-
-                const userMsg = chatInput.trim();
-                setChatInput('');
-                setChatMessages(prev => [...prev, { role: 'user', content: userMsg }]);
-                setIsChatLoading(true);
-
-                try {
-                    const aiAnswer = await callGemini({
-                        apiKey: apiKey.trim(),
-                        parts: [{ text: `다음은 추출된 문서 내용입니다:\n---\n${ocrResult}\n---\n\n질문에 친절하고 명확하게 답변해 주세요:\n질문: ${userMsg}` }]
-                    });
-                    setChatMessages(prev => [...prev, { role: 'assistant', content: aiAnswer }]);
-                } catch (err) {
-                    console.warn('Chat failed:', err);
-                    setChatMessages(prev => [...prev, { role: 'assistant', content: `질문 처리 중 오류가 발생했습니다: ${err.message}` }]);
-                }
-                setIsChatLoading(false);
             };
 
             return (
@@ -771,26 +656,11 @@
                                 <h1 className="text-lg font-bold bg-gradient-to-r from-white via-slate-200 to-blue-400 bg-clip-text text-transparent">
                                     Easy OCR V0.1
                                 </h1>
-                                <p className="text-xs text-slate-400">Gemini AI OCR & 로컬 Tesseract Engine</p>
+                                <p className="text-xs text-slate-400">로컬 Tesseract 영어 OCR (API 키 불필요)</p>
                             </div>
                         </div>
 
                         <div className="flex items-center space-x-2">
-                            <button
-                                onClick={() => {
-                                    setTempApiKeyInput(apiKey);
-                                    setIsApiKeyModalOpen(true);
-                                }}
-                                className={`px-3 py-1.5 text-xs font-medium rounded-lg flex items-center space-x-1.5 border transition ${
-                                    apiKey 
-                                        ? 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700' 
-                                        : 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30'
-                                }`}
-                            >
-                                <Icon name="key" className="w-3.5 h-3.5" />
-                                <span>{apiKey ? 'Gemini 키 설정됨' : '🔑 Gemini API 키 설정'}</span>
-                            </button>
-
                             <button
                                 onClick={() => setIsHistoryOpen(!isHistoryOpen)}
                                 className="px-3 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg flex items-center space-x-1.5 border border-slate-700 transition"
@@ -813,109 +683,12 @@
                         </div>
                     )}
 
-                    {/* API Key Modal */}
-                    {isApiKeyModalOpen && (
-                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-                            <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl">
-                                <div className="flex justify-between items-center pb-3 border-b border-slate-800">
-                                    <h3 className="font-semibold text-slate-100 flex items-center space-x-2">
-                                        <Icon name="key" className="w-4 h-4 text-blue-400" />
-                                        <span>Gemini API 키 등록</span>
-                                    </h3>
-                                    <button onClick={() => setIsApiKeyModalOpen(false)} className="text-slate-400 hover:text-white">
-                                        <Icon name="x" className="w-5 h-5" />
-                                    </button>
-                                </div>
-                                <div className="py-4 space-y-3">
-                                    <div>
-                                        <label className="text-xs font-semibold text-blue-300 block mb-1">Google Gemini API Key (무료 발급)</label>
-                                        <input 
-                                            type="password"
-                                            placeholder="AIzaSy..."
-                                            value={tempApiKeyInput}
-                                            onChange={(e) => setTempApiKeyInput(e.target.value)}
-                                            className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3.5 py-2 text-xs font-mono text-slate-200 focus:border-blue-500 outline-none"
-                                        />
-                                        <p className="text-[11px] text-slate-400 mt-1">
-                                            스마트 서식 스캔과 문서 Q&A에 사용됩니다. 
-                                            <a href="https://aistudio.google.com/" target="_blank" rel="noreferrer" className="text-blue-400 underline ml-1 hover:text-blue-300">
-                                                무료 발급 받기
-                                            </a>
-                                        </p>
-                                    </div>
-
-                                    <div className="p-3 bg-blue-950/40 border border-blue-500/30 rounded-xl text-[11px] text-blue-200 leading-relaxed">
-                                        ℹ️ 출판된 책 페이지는 Gemini의 저작물 재현 방지 정책(RECITATION)으로 응답이 차단될 수 있습니다. 이 경우 우회하지 않고, 옵션에 따라 해당 페이지만 내 브라우저의 로컬 Tesseract 엔진으로 인식합니다.
-                                    </div>
-                                </div>
-                                <div className="flex justify-end space-x-2 pt-2 border-t border-slate-800">
-                                    <button 
-                                        onClick={() => setIsApiKeyModalOpen(false)} 
-                                        className="px-4 py-2 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl"
-                                    >
-                                        취소
-                                    </button>
-                                    <button 
-                                        onClick={handleSaveApiKey} 
-                                        className="px-4 py-2 text-xs bg-blue-600 hover:bg-blue-500 text-white font-medium rounded-xl shadow-lg shadow-blue-500/20"
-                                    >
-                                        저장하기
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
                     {/* Main Layout */}
                     <main className="flex-grow p-4 lg:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 max-w-[1800px] mx-auto w-full">
                         
-                        {/* LEFT PANEL: Engine Selector, Upload, Filters & Options */}
+                        {/* LEFT PANEL: Upload, Filters & Options */}
                         <div className="lg:col-span-5 flex flex-col space-y-5">
                             
-                            {/* Engine Switcher Component */}
-                            <div className="glass-panel p-4 rounded-2xl border border-slate-800 space-y-3">
-                                <div className="flex items-center justify-between">
-                                    <h2 className="text-xs font-semibold text-slate-200 flex items-center space-x-2">
-                                        <Icon name="scan-text" className="w-4 h-4 text-blue-400" />
-                                        <span>OCR 스캔 엔진 선택</span>
-                                    </h2>
-                                </div>
-
-                                <div className="grid grid-cols-2 gap-2">
-                                    {/* Engine 1: Gemini AI */}
-                                    <button
-                                        onClick={() => setOcrEngine('gemini')}
-                                        className={`p-3 rounded-xl border text-left flex flex-col justify-between transition ${
-                                            ocrEngine === 'gemini' 
-                                                ? 'bg-blue-600/25 border-blue-500 text-blue-200 ring-1 ring-blue-500/40 shadow-lg shadow-blue-500/10' 
-                                                : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:bg-slate-800 hover:text-slate-200'
-                                        }`}
-                                    >
-                                        <div className="flex items-center space-x-1.5 mb-1.5">
-                                            <Icon name="sparkles" className="w-4 h-4 text-blue-400" />
-                                            <span className="text-xs font-bold">Gemini AI</span>
-                                        </div>
-                                        <span className="text-[10px] text-slate-400 leading-tight">★ 스마트 서식 (표·제목) 인식</span>
-                                    </button>
-
-                                    {/* Engine 2: Local Tesseract (Zero Copyright Filter) */}
-                                    <button
-                                        onClick={() => setOcrEngine('tesseract')}
-                                        className={`p-3 rounded-xl border text-left flex flex-col justify-between transition ${
-                                            ocrEngine === 'tesseract' 
-                                                ? 'bg-emerald-600/25 border-emerald-500 text-emerald-200 ring-1 ring-emerald-500/40 shadow-lg shadow-emerald-500/10' 
-                                                : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:bg-slate-800 hover:text-slate-200'
-                                        }`}
-                                    >
-                                        <div className="flex items-center space-x-1.5 mb-1.5">
-                                            <Icon name="shield-check" className="w-4 h-4 text-emerald-400" />
-                                            <span className="text-xs font-bold">로컬 Tesseract</span>
-                                        </div>
-                                        <span className="text-[10px] text-emerald-300/80 leading-tight">★ 브라우저 내 처리 / API 키 불필요</span>
-                                    </button>
-                                </div>
-                            </div>
-
                             {/* File Upload Box */}
                             <div 
                                 tabIndex={0}
@@ -1094,7 +867,7 @@
 
                                     <div className="flex items-center justify-between pt-1">
                                         <button
-                                            onClick={() => setFilters(f => ({ ...f, rotation: (f.rotation + 90) % 360 }))}
+                                            onClick={rotatePages}
                                             className="px-3 py-1.5 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-xl flex items-center space-x-1.5 transition"
                                         >
                                             <Icon name="rotate-cw" className="w-3.5 h-3.5" />
@@ -1114,101 +887,55 @@
                                 </div>
                             )}
 
-                            {/* Mode Options */}
+                            {/* 제외 영역 지정: 삽화 등 스캔하지 않을 부분을 드래그로 지운다 */}
+                            {pages.length > 0 && pages[selectedPageIndex] && (
+                                <div className="glass-panel p-4 rounded-2xl border border-slate-800 space-y-3">
+                                    <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                                        <h3 className="text-xs font-semibold text-slate-200">
+                                            ✂️ 스캔 제외 영역 지정 (#{selectedPageIndex + 1})
+                                        </h3>
+                                        <span className="text-[11px] text-slate-400">
+                                            {(pages[selectedPageIndex].masks || []).length}개 지정됨
+                                        </span>
+                                    </div>
+                                    <p className="text-[11px] text-slate-400">
+                                        삽화·사진처럼 읽지 않을 부분을 마우스(터치)로 드래그해 빨간 박스로 지정하세요. 박스 안은 흰색으로 지운 뒤 스캔합니다.
+                                    </p>
+                                    <MaskEditor
+                                        src={pages[selectedPageIndex].processedSrc || pages[selectedPageIndex].rawSrc}
+                                        rects={pages[selectedPageIndex].masks || []}
+                                        onChange={(m) => setPageMasks(selectedPageIndex, m)}
+                                    />
+                                    <div className="flex items-center justify-between text-xs">
+                                        <button
+                                            onClick={() => setPageMasks(selectedPageIndex, [])}
+                                            className="text-slate-400 hover:text-slate-200 underline"
+                                        >이 페이지 영역 모두 지우기</button>
+                                        <button
+                                            onClick={applyMasksToAllPages}
+                                            disabled={(pages[selectedPageIndex].masks || []).length === 0}
+                                            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 border border-slate-700 rounded-xl transition"
+                                        >모든 페이지에 같은 영역 적용</button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Scan Options */}
                             <div className="glass-panel p-4 rounded-2xl border border-slate-800 space-y-4">
                                 <h3 className="text-xs font-semibold text-slate-200 flex items-center space-x-2">
                                     <Icon name="sparkles" className="w-4 h-4 text-amber-400" />
-                                    <span>OCR 스캔 옵션 설정</span>
+                                    <span>OCR 스캔 (Tesseract · English)</span>
                                 </h3>
 
-                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                                    {[
-                                        { id: 'markdown', label: '마크다운 구조', icon: 'file-text', desc: '본문 + 표 보존' },
-                                        { id: 'plain', label: '일반 텍스트', icon: 'align-left', desc: '순수 글자' },
-                                        { id: 'table', label: '표/데이터 표', icon: 'table', desc: '표 추출' },
-                                        { id: 'translate', label: '텍스트 + 번역', icon: 'languages', desc: '언어 번역' },
-                                        { id: 'keyvalue', label: '영수증/JSON', icon: 'receipt', desc: 'JSON 추출' },
-                                        { id: 'handwriting', label: '손글씨/복잡 문서', icon: 'pen-tool', desc: '고난도 인식' }
-                                    ].map(mode => (
-                                        <button
-                                            key={mode.id}
-                                            onClick={() => setOcrMode(mode.id)}
-                                            className={`p-2.5 rounded-xl border text-left flex flex-col justify-between transition ${
-                                                ocrMode === mode.id 
-                                                    ? 'bg-blue-600/20 border-blue-500 text-blue-200 ring-1 ring-blue-500/40' 
-                                                    : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:bg-slate-800 hover:text-slate-200'
-                                            }`}
-                                        >
-                                            <div className="flex items-center space-x-1.5 mb-1">
-                                                <Icon name={mode.icon} className="w-3.5 h-3.5 text-blue-400" />
-                                                <span className="text-xs font-medium">{mode.label}</span>
-                                            </div>
-                                            <span className="text-[10px] text-slate-500">{mode.desc}</span>
-                                        </button>
-                                    ))}
-                                </div>
-
-                                {ocrMode === 'translate' && (
-                                    <div>
-                                        <label className="text-xs text-slate-400 block mb-1">번역 대상 언어</label>
-                                        <select 
-                                            value={targetLang}
-                                            onChange={(e) => setTargetLang(e.target.value)}
-                                            className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200 outline-none"
-                                        >
-                                            <option value="Korean">한국어 (Korean)</option>
-                                            <option value="English">영어 (English)</option>
-                                            <option value="Japanese">일본어 (Japanese)</option>
-                                            <option value="Chinese">중국어 (Chinese)</option>
-                                        </select>
-                                    </div>
-                                )}
-
-                                {/* Book Scan Checkboxes */}
-                                <div className="space-y-2 pt-2 border-t border-slate-800">
-                                    <label className="flex items-center space-x-2 text-xs text-slate-300 cursor-pointer">
-                                        <input 
-                                            type="checkbox" 
-                                            checked={removeBookHeaderFooter} 
-                                            onChange={(e) => setRemoveBookHeaderFooter(e.target.checked)}
-                                            className="accent-blue-500 rounded"
-                                        />
-                                        <span>책 상단 헤더, 하단 여백 문구 제외 (본문만 추출)</span>
-                                    </label>
-
-                                    <label className="flex items-center space-x-2 text-xs text-slate-300 cursor-pointer">
-                                        <input 
-                                            type="checkbox" 
-                                            checked={includePageDelimiter} 
-                                            onChange={(e) => setIncludePageDelimiter(e.target.checked)}
-                                            className="accent-blue-500 rounded"
-                                        />
-                                        <span>이미지에 실제 인쇄된 페이지 번호가 감지될 때만 &lt;page X&gt; 구분자 표시</span>
-                                    </label>
-
-                                    {ocrEngine === 'gemini' && (
-                                        <label className="flex items-center space-x-2 text-xs text-slate-300 cursor-pointer">
-                                            <input 
-                                                type="checkbox" 
-                                                checked={fallbackToTesseract} 
-                                                onChange={(e) => setFallbackToTesseract(e.target.checked)}
-                                                className="accent-blue-500 rounded"
-                                            />
-                                            <span>Gemini가 정책(RECITATION)으로 차단한 페이지는 로컬 Tesseract로 인식</span>
-                                        </label>
-                                    )}
-                                </div>
-
-                                <div>
-                                    <label className="text-xs text-slate-400 block mb-1">추가 지시사항 (선택)</label>
-                                    <input 
-                                        type="text"
-                                        placeholder="예: 특정 항목 강조, 주석 제외 등..."
-                                        value={customInstruction}
-                                        onChange={(e) => setCustomInstruction(e.target.value)}
-                                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 outline-none focus:border-blue-500"
+                                <label className="flex items-center space-x-2 text-xs text-slate-300 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={reflowText}
+                                        onChange={(e) => setReflowText(e.target.checked)}
+                                        className="accent-blue-500 rounded"
                                     />
-                                </div>
+                                    <span>문단 안의 줄바꿈을 합쳐서 출력 (책의 줄 단위 개행 제거)</span>
+                                </label>
 
                                 {/* Run OCR Button */}
                                 <button
@@ -1224,38 +951,20 @@
                                     <span>
                                         {isLoading 
                                             ? `스캔 중... (${progressStatus.current} / ${progressStatus.total} 페이지) - ${progressStatus.detail}` 
-                                            : `[${ocrEngine.toUpperCase()} 엔진] 총 ${pages.length}개 페이지 연속 스캔 시작`}
+                                            : `총 ${pages.length}개 페이지 스캔 시작`}
                                     </span>
                                 </button>
                             </div>
                         </div>
 
-                        {/* RIGHT PANEL: Output Viewport & Controls & AI Chatbot */}
+                        {/* RIGHT PANEL: Output Viewport & Controls */}
                         <div className="lg:col-span-7 flex flex-col space-y-4">
                             
                             <div className="glass-panel rounded-2xl border border-slate-800 p-4 flex-grow flex flex-col shadow-2xl min-h-[550px]">
                                 
                                 {/* Output Header Controls */}
                                 <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800">
-                                    <div className="flex items-center space-x-1 bg-slate-900/80 p-1 rounded-xl border border-slate-800">
-                                        {[
-                                            { id: 'formatted', label: '서식 뷰어', icon: 'eye' },
-                                            { id: 'raw', label: '원본 마크다운', icon: 'code' },
-                                        ].map(tab => (
-                                            <button
-                                                key={tab.id}
-                                                onClick={() => setActiveResultTab(tab.id)}
-                                                className={`px-3 py-1.5 text-xs font-medium rounded-lg flex items-center space-x-1.5 transition ${
-                                                    activeResultTab === tab.id 
-                                                        ? 'bg-blue-600 text-white shadow-md' 
-                                                        : 'text-slate-400 hover:text-slate-200'
-                                                }`}
-                                            >
-                                                <Icon name={tab.icon} className="w-3.5 h-3.5" />
-                                                <span>{tab.label}</span>
-                                            </button>
-                                        ))}
-                                    </div>
+                                    <span className="text-xs font-medium text-slate-300">스캔 결과</span>
 
                                     <div className="flex items-center space-x-2">
                                         <button
@@ -1280,22 +989,13 @@
                                             <span>복사</span>
                                         </button>
 
-                                        <div className="flex items-center space-x-1">
-                                            <button
-                                                onClick={() => handleDownload('txt')}
-                                                disabled={!ocrResult}
-                                                className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-xl text-xs transition"
-                                            >
-                                                .TXT
-                                            </button>
-                                            <button
-                                                onClick={() => handleDownload('md')}
-                                                disabled={!ocrResult}
-                                                className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-xl text-xs transition"
-                                            >
-                                                .MD
-                                            </button>
-                                        </div>
+                                        <button
+                                            onClick={handleDownload}
+                                            disabled={!ocrResult}
+                                            className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-xl text-xs transition"
+                                        >
+                                            .TXT
+                                        </button>
                                     </div>
                                 </div>
 
@@ -1315,59 +1015,15 @@
                                         </div>
                                     )}
 
-                                    {ocrResult && activeResultTab === 'formatted' && (
-                                        <div 
-                                            className="prose prose-invert max-w-none text-xs leading-relaxed text-slate-200 space-y-3"
-                                            dangerouslySetInnerHTML={{ __html: renderMarkdownSafely(ocrResult) }}
-                                        />
-                                    )}
-
-                                    {ocrResult && activeResultTab === 'raw' && (
+                                    {ocrResult && (
                                         <textarea
                                             readOnly
                                             value={ocrResult}
-                                            className="w-full h-full min-h-[450px] bg-transparent text-xs font-mono text-slate-300 outline-none resize-none"
+                                            className="w-full h-full min-h-[450px] bg-transparent text-sm leading-relaxed text-slate-200 outline-none resize-none"
                                         />
                                     )}
                                 </div>
 
-                                {/* AI Document Chatbot */}
-                                {ocrResult && (
-                                    <div className="border-t border-slate-800/80 pt-3 mt-auto">
-                                        <div className="flex items-center space-x-2 mb-2">
-                                            <Icon name="bot" className="w-4 h-4 text-blue-400" />
-                                            <span className="text-xs font-medium text-slate-300">추출된 문서 기반 AI 질문하기</span>
-                                        </div>
-
-                                        {chatMessages.length > 0 && (
-                                            <div className="max-h-36 overflow-y-auto mb-2 space-y-2 p-2 bg-slate-900/60 rounded-xl border border-slate-800 text-xs">
-                                                {chatMessages.map((msg, i) => (
-                                                    <div key={i} className={`p-2 rounded-lg ${msg.role === 'user' ? 'bg-blue-600/20 text-blue-200 text-right ml-8' : 'bg-slate-800 text-slate-200 mr-8'}`}>
-                                                        {msg.content}
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
-
-                                        <div className="flex space-x-2">
-                                            <input 
-                                                type="text"
-                                                placeholder="문서 내용에 대해 질문하세요 (예: 요약해줘, 주요 키워드는?)"
-                                                value={chatInput}
-                                                onChange={(e) => setChatInput(e.target.value)}
-                                                onKeyDown={(e) => e.key === 'Enter' && handleSendChatMessage()}
-                                                className="flex-grow bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-slate-200 outline-none focus:border-blue-500"
-                                            />
-                                            <button
-                                                onClick={handleSendChatMessage}
-                                                disabled={isChatLoading}
-                                                className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-medium flex items-center space-x-1 transition shadow-md"
-                                            >
-                                                <Icon name="send" className="w-3.5 h-3.5" />
-                                            </button>
-                                        </div>
-                                    </div>
-                                )}
                             </div>
                         </div>
                     </main>
