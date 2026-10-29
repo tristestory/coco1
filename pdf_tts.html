@@ -1,0 +1,986 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF TTS Player</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<style>
+  :root {
+    --bar: #1e2124;
+    --bar-fg: #e8eaed;
+    --bar-dim: #9aa0a6;
+    --btn: #33383d;
+    --btn-border: #4a5056;
+    --accent: #3b82f6;
+    --desk: #525659;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", Roboto, sans-serif;
+    background: var(--desk);
+    color: var(--bar-fg);
+  }
+
+  /* ===== 툴바 ===== */
+  #toolbar {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+    padding: 8px 12px;
+    background: var(--bar);
+    box-shadow: 0 2px 10px rgba(0,0,0,.35);
+  }
+  .group { display: flex; align-items: center; gap: 6px; }
+  button, .btn, select {
+    font: inherit; font-size: 14px; color: var(--bar-fg);
+    background: var(--btn); border: 1px solid var(--btn-border); border-radius: 6px;
+    padding: 7px 12px; cursor: pointer; transition: background .15s, border-color .15s;
+  }
+  button:hover:not(:disabled), .btn:hover { background: var(--accent); border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); min-width: 104px; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.12); }
+  select { padding: 6px 8px; max-width: 220px; }
+  label.field, label.chk { white-space: nowrap; }
+  label.field { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--bar-dim); }
+  label.chk { display: flex; align-items: center; gap: 5px; font-size: 13px; color: var(--bar-dim); cursor: pointer; }
+  #zoom-label { min-width: 46px; text-align: center; font-size: 13px; color: var(--bar-dim); }
+  #status { flex: 1 1 260px; min-width: 200px; font-size: 13px; color: var(--bar-dim); }
+  #status.err { color: #ff8a80; }
+  #progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: transparent; }
+  #progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+  input[type="file"] { display: none; }
+
+  /* ===== 페이지 ===== */
+  #pdf-container {
+    display: grid; justify-content: safe center; gap: 16px;
+    padding: 16px 12px 60px;
+  }
+  .page {
+    position: relative; background: #fff; overflow: hidden;
+    box-shadow: 0 4px 16px rgba(0,0,0,.35);
+  }
+  .page canvas { display: block; }
+
+  /* 투명 텍스트 레이어: 글자는 숨기고 단어 박스만 하이라이트에 사용 */
+  .tl { position: absolute; inset: 0; pointer-events: none; }
+  .ti {
+    position: absolute; white-space: pre; line-height: 1;
+    color: transparent; transform-origin: 0 0;
+  }
+  .w { pointer-events: auto; cursor: pointer; border-radius: 3px; }
+  .w:hover { background: rgba(59,130,246,.28); }
+  .w.sent { background: rgba(255,235,59,.24); }
+  .w.active { background: rgba(255,214,0,.72); box-shadow: 0 0 0 1px rgba(255,160,0,.9); }
+
+  body.dragging::after {
+    content: "PDF를 여기에 놓으세요"; position: fixed; inset: 0; z-index: 200;
+    display: grid; place-items: center; font-size: 28px;
+    background: rgba(30,33,36,.85); border: 3px dashed var(--accent);
+  }
+
+  @media (max-width: 640px) {
+    button, .btn, select { padding: 6px 9px; font-size: 13px; }
+    #toolbar { gap: 6px 8px; }
+    select { max-width: 150px; }
+    #status { flex-basis: 100%; font-size: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<header id="toolbar">
+  <div class="group">
+    <label class="btn" for="pdf-input">📂 PDF 열기</label>
+    <input type="file" id="pdf-input" accept="application/pdf,.pdf">
+  </div>
+
+  <div class="group">
+    <button id="btn-prev" title="이전 문장 (←)" aria-label="이전 문장" disabled>⏮</button>
+    <button id="btn-play" class="primary" title="재생/일시정지 (Space)" disabled>▶ 재생</button>
+    <button id="btn-stop" title="정지 (Esc)" aria-label="정지" disabled>⏹</button>
+    <button id="btn-next" title="다음 문장 (→)" aria-label="다음 문장" disabled>⏭</button>
+  </div>
+
+  <div class="group">
+    <label class="field">속도
+      <select id="select-rate">
+        <option value="0.6">0.6x</option>
+        <option value="0.8">0.8x</option>
+        <option value="1" selected>1.0x</option>
+        <option value="1.25">1.25x</option>
+        <option value="1.5">1.5x</option>
+        <option value="1.75">1.75x</option>
+        <option value="2">2.0x</option>
+      </select>
+    </label>
+    <label class="field">음성
+      <select id="select-voice"><option value="auto">자동 (언어 감지)</option></select>
+    </label>
+    <label class="chk" title="페이지 위·아래 가장자리의 머리글, 바닥글, 쪽번호를 읽지 않습니다">
+      <input type="checkbox" id="chk-edges" checked> 머리글·쪽번호 제외
+    </label>
+  </div>
+
+  <div class="group">
+    <button id="btn-zoom-out" title="축소" aria-label="축소">−</button>
+    <span id="zoom-label">100%</span>
+    <button id="btn-zoom-in" title="확대" aria-label="확대">+</button>
+  </div>
+
+  <div id="status" role="status" aria-live="polite">PDF 파일을 선택하거나 이 창에 끌어다 놓으세요.</div>
+  <div id="progress"><i></i></div>
+</header>
+
+<main id="pdf-container"></main>
+
+<script>
+(() => {
+'use strict';
+
+const $ = id => document.getElementById(id);
+const els = {
+  input: $('pdf-input'), prev: $('btn-prev'), play: $('btn-play'), stop: $('btn-stop'), next: $('btn-next'),
+  rate: $('select-rate'), voice: $('select-voice'), edges: $('chk-edges'),
+  zoomIn: $('btn-zoom-in'), zoomOut: $('btn-zoom-out'), zoomLabel: $('zoom-label'),
+  status: $('status'), progress: $('progress').firstElementChild, toolbar: $('toolbar'),
+  container: $('pdf-container'),
+};
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('pdftts.' + k); return v === null ? d : v; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('pdftts.' + k, v); } catch {} },
+};
+
+function setStatus(msg, isErr) {
+  if (els.status.textContent !== msg) els.status.textContent = msg;
+  els.status.classList.toggle('err', !!isErr);
+}
+
+if (typeof pdfjsLib === 'undefined') {
+  setStatus('PDF.js를 불러오지 못했습니다. 네트워크 연결을 확인하세요.', true);
+  return;
+}
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+const synth = window.speechSynthesis;
+if (!synth) setStatus('이 브라우저는 음성 합성(Web Speech API)을 지원하지 않습니다.', true);
+
+/* =====================================================================
+ * 1. 문서 모델
+ *    tokens  : 문서 전체 단어 목록 (화면 DOM과 분리). el 은 해당 페이지가
+ *              렌더링되어 있을 때만 채워진다.
+ *    pages   : 페이지별 레이아웃/렌더 상태
+ * ===================================================================== */
+let pdfDoc = null;
+let loadId = 0;
+let tokens = [];
+let sentStarts = [];
+const pages = [];
+
+const zoomSteps = [0.6, 0.8, 1, 1.25, 1.5, 2, 2.5];
+let zoomIdx = Math.max(0, Math.min(zoomSteps.length - 1, +store.get('zoom', 2)));
+
+const measureCtx = document.createElement('canvas').getContext('2d');
+
+const BULLET_RE = /^[•●○◦■□▪▫◆◇★☆▶►▷·※✓✔]+$/;
+const END_RE = /[.!?。！？…]["'”’)\]」』）]*$/;
+const PAGENO_RE = /^(?:[-–—]\s*)?(?:page\s*|p\.\s*|쪽\s*)?\d{1,4}(?:\s*(?:\/|of)\s*\d{1,4})?(?:\s*쪽)?(?:\s*[-–—])?$/i;
+const HANGUL_END = /[\uAC00-\uD7A3]$/;
+const HANGUL_START = /^[\uAC00-\uD7A3]/;
+const ABBR_RE = /^(?:[A-Za-z]|Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e|Fig|Eq|Vol|pp|cf|al)\.$/i;
+
+function isSentenceEnd(t) {
+  if (t.para) return true;
+  const s = t.speak;
+  if (!END_RE.test(s)) return false;
+  const bare = s.replace(/["'”’)\]]+$/, '');
+  if (/\.$/.test(bare) && (ABBR_RE.test(bare) || /^\d+\.$/.test(bare))) return false;
+  return true;
+}
+
+/* 텍스트 추출: 항목(item) 사이의 공백/줄바꿈/문단/하이픈을 복원해 토큰 생성 */
+function extractPage(pi, tc, vp) {
+  const list = [];
+  for (const raw of tc.items) {
+    if (typeof raw.str !== 'string') continue;
+    const tx = pdfjsLib.Util.transform(vp.transform, raw.transform);
+    const fh = Math.hypot(tx[2], tx[3]) || 1;
+    list.push({
+      raw, x: tx[4], y: tx[5], fh,
+      w: raw.width > 0 ? raw.width * vp.scale : raw.str.length * fh * 0.5,
+      blank: raw.str.trim() === '',
+    });
+  }
+
+  // 줄 간격 중앙값: 이중 간격 문서에서 모든 줄이 문단으로 잘못 나뉘는 것을 막는다
+  const dys = [];
+  let ly = null;
+  for (const g of list) {
+    if (g.blank) continue;
+    if (ly !== null && Math.abs(g.y - ly) > g.fh * 0.5) dys.push(Math.abs(g.y - ly));
+    ly = g.y;
+  }
+  dys.sort((a, b) => a - b);
+  const med = dys.length >= 3 ? dys[dys.length >> 1] : 0;
+  const maxRight = list.reduce((m, g) => g.blank ? m : Math.max(m, g.x + g.w), 0);
+
+  const items = [];
+  const first = tokens.length;
+  let lastTok = tokens.length ? tokens[tokens.length - 1] : null;
+  if (lastTok && lastTok.sep === '') lastTok.sep = ' ';
+  let prev = null, line = null;
+
+  for (const g of list) {
+    const s = g.raw.str;
+    if (g.blank) {
+      if (lastTok && lastTok.sep === '') lastTok.sep = ' ';
+      if (g.raw.hasEOL && prev) prev.eol = true;
+      continue;
+    }
+
+    const best = Math.max(g.fh, prev ? prev.fh : 0);
+    const sameLine = !!prev && Math.abs(g.y - prev.y) <= best * 0.5;
+    if (lastTok && lastTok.sep === '' && /^\s/.test(s)) lastTok.sep = ' ';
+
+    if (prev && lastTok) {
+      if (sameLine) {
+        const gap = g.x - (prev.x + prev.w);
+        if (lastTok.sep === '' && (prev.eol || gap > best * 0.15 || gap < -best * 2)) lastTok.sep = ' ';
+      } else {
+        const dy = Math.abs(g.y - prev.y);
+        const lf = line ? line.fh : prev.fh;
+        const ref = med || lf * 1.3;
+        const para = dy > ref * 1.5 || Math.abs(g.fh - lf) > lf * 0.15;
+        if (lastTok.sep === '') {
+          // 하이픈이 별도 item 으로 분리된 경우("word" + "-")와 한 token 에 붙은 경우("word-")를 모두 처리
+          const hyOnly = /^[-\u2010\u00AD]$/.test(lastTok.text);
+          const before = hyOnly && tokens.length > 1 ? tokens[tokens.length - 2] : null;
+          const hyphenated = hyOnly
+            ? !!before && before.p === lastTok.p && before.sep === '' && /\p{L}$/u.test(before.text)
+            : /\p{L}[-\u2010\u00AD]$/u.test(lastTok.text);
+          if (!para && hyphenated && /^[a-zß-ÿ]/.test(s)) {
+            lastTok.speak = lastTok.text.replace(/[-\u2010\u00AD]+$/, '');  // 줄 끝 하이픈 → 단어 이어붙임
+            lastTok.joined = true;
+            if (hyOnly) before.joined = true;
+          } else if (!para && HANGUL_END.test(lastTok.text) && HANGUL_START.test(s.trimStart())
+                     && prev.x + prev.w >= maxRight * 0.93) {
+            lastTok.joined = true;                                      // 한글 단어가 줄 끝에서 꺾인 경우 → 공백 없이 이어붙임
+          } else {
+            lastTok.sep = ' ';
+          }
+        }
+        if (para) lastTok.para = true;
+      }
+    }
+    if (!prev || !sameLine) line = { fh: g.fh, len: s.length };
+    else if (s.length > line.len) { line.fh = g.fh; line.len = s.length; }
+
+    const item = {
+      str: s, transform: g.raw.transform, width: g.raw.width, height: g.raw.height,
+      fontName: g.raw.fontName, toks: [], yv: g.y / vp.height,
+    };
+    const idx = items.push(item) - 1;
+
+    let off = 0;
+    for (const part of s.split(/(\s+)/)) {
+      if (!part) continue;
+      if (/^\s/.test(part)) {
+        if (item.toks.length) tokens[item.toks[item.toks.length - 1]].sep = ' ';
+        off += part.length;
+        continue;
+      }
+      const speak = part.replace(/[\u00AD\u200B-\u200D\uFEFF]/g, '').replace(BULLET_RE, '');
+      const t = {
+        p: pi, it: idx, s: off, e: off + part.length, text: part, speak,
+        sep: '', para: false, joined: false, edge: false, end: false, el: null,
+      };
+      item.toks.push(tokens.push(t) - 1);
+      lastTok = t;
+      off += part.length;
+    }
+    prev = { x: g.x, y: g.y, w: g.w, fh: g.fh, eol: !!g.raw.hasEOL };
+  }
+  return { items, first, last: tokens.length };
+}
+
+/* 머리글/바닥글/쪽번호: 여러 쪽에 반복되는 가장자리 텍스트 + 가장자리의 단독 쪽번호 */
+function markEdges() {
+  const N = pages.length;
+  const zone = it => it.yv < 0.15 || it.yv > 0.85;
+  const keyOf = it => it.str.trim().replace(/\d+/g, '#') + '|' + Math.round(it.yv * 40);
+  const counts = new Map();
+  for (const p of pages) {
+    const seen = new Set();
+    for (const it of p.items) {
+      if (!zone(it)) continue;
+      const k = keyOf(it);
+      if (!seen.has(k)) { seen.add(k); counts.set(k, (counts.get(k) || 0) + 1); }
+    }
+  }
+  const minCount = Math.max(2, Math.ceil(N * 0.4));
+  for (const p of pages) {
+    for (const it of p.items) {
+      if (!zone(it)) continue;
+      const repeated = N >= 2 && counts.get(keyOf(it)) >= minCount;
+      const pageNo = (it.yv < 0.1 || it.yv > 0.9) && PAGENO_RE.test(it.str.trim());
+      if (repeated || pageNo) for (const ti of it.toks) tokens[ti].edge = true;
+    }
+  }
+}
+
+function computeSentences() {
+  sentStarts = [];
+  let startNext = true;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    t.end = isSentenceEnd(t);
+    if (startNext) { sentStarts.push(i); startNext = false; }
+    if (t.end) startNext = true;
+  }
+}
+
+function floorIndex(arr, x) {
+  let lo = 0, hi = arr.length - 1, r = 0;
+  while (lo <= hi) {
+    const m = (lo + hi) >> 1;
+    if (arr[m] <= x) { r = m; lo = m + 1; } else hi = m - 1;
+  }
+  return r;
+}
+
+/* =====================================================================
+ * 2. 렌더링 (지연 렌더 + 텍스트 레이어)
+ * ===================================================================== */
+const io = new IntersectionObserver(entries => {
+  for (const e of entries) {
+    const p = e.target._page;
+    p.want = e.isIntersecting;
+    if (p.want) renderPage(p); else unrenderPage(p);
+  }
+}, { rootMargin: '1500px 0px' });
+
+function pageScale(p) {
+  const avail = Math.min(els.container.clientWidth - 24, 1100);
+  return Math.max(0.2, avail / p.base.w) * zoomSteps[zoomIdx];
+}
+
+function sizeWrapper(p) {
+  p.scale = pageScale(p);
+  p.wrapper.style.width = Math.floor(p.base.w * p.scale) + 'px';
+  p.wrapper.style.height = Math.floor(p.base.h * p.scale) + 'px';
+}
+
+async function renderPage(p) {
+  if (p.rendered || p.rendering || !pdfDoc) return;
+  const myLoad = loadId, g = ++p.gen;
+  p.rendering = true;
+  try {
+    const page = await pdfDoc.getPage(p.n);
+    if (myLoad !== loadId || g !== p.gen) return;
+    const vp = page.getViewport({ scale: p.scale });
+    const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.floor(vp.width * dpr);
+    canvas.height = Math.floor(vp.height * dpr);
+    canvas.style.width = Math.floor(vp.width) + 'px';
+    canvas.style.height = Math.floor(vp.height) + 'px';
+    p.task = page.render({
+      canvasContext: canvas.getContext('2d', { alpha: false }),
+      viewport: vp,
+      transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+    });
+    await p.task.promise;
+    if (myLoad !== loadId || g !== p.gen) return;
+
+    p.wrapper.replaceChildren(canvas, buildTextLayer(p, vp));
+    p.rendered = true;
+    if (active >= 0) applyHighlight(pendingScroll);
+  } catch (e) {
+    if (!e || e.name !== 'RenderingCancelledException') console.error('render error', e);
+  } finally {
+    p.rendering = false;
+    p.task = null;
+    if (p.want && !p.rendered && myLoad === loadId) renderPage(p);
+  }
+}
+
+function unrenderPage(p) {
+  p.gen++;
+  if (p.task) { try { p.task.cancel(); } catch {} }
+  if (!p.rendered) return;
+  for (let i = p.tokStart; i < p.tokEnd; i++) tokens[i].el = null;
+  p.wrapper.replaceChildren();
+  p.rendered = false;
+}
+
+function buildTextLayer(p, vp) {
+  const layer = document.createElement('div');
+  layer.className = 'tl';
+  let lastFont = '';
+  for (const item of p.items) {
+    const style = p.styles[item.fontName] || {};
+    const family = style.fontFamily || 'sans-serif';
+    const tx = pdfjsLib.Util.transform(vp.transform, item.transform);
+    let angle = Math.atan2(tx[1], tx[0]);
+    if (style.vertical) angle += Math.PI / 2;
+    const fh = Math.hypot(tx[2], tx[3]);
+    let asc = fh;
+    if (style.ascent) asc = style.ascent * fh;
+    else if (style.descent) asc = (1 + style.descent) * fh;
+
+    const div = document.createElement('div');
+    div.className = 'ti';
+    div.style.left = (angle === 0 ? tx[4] : tx[4] + asc * Math.sin(angle)) + 'px';
+    div.style.top = (angle === 0 ? tx[5] - asc : tx[5] - asc * Math.cos(angle)) + 'px';
+    div.style.fontSize = fh + 'px';
+    div.style.fontFamily = family;
+
+    let pos = 0;
+    for (const ti of item.toks) {
+      const t = tokens[ti];
+      if (t.s > pos) div.append(item.str.slice(pos, t.s));
+      const span = document.createElement('span');
+      span.className = 'w';
+      span.dataset.t = ti;
+      span.textContent = t.text;
+      t.el = span;
+      div.append(span);
+      pos = t.e;
+    }
+    if (pos < item.str.length) div.append(item.str.slice(pos));
+
+    // PDF 원본 글자 폭에 맞춰 가로 배율을 보정 → 하이라이트 박스가 실제 글자와 겹침
+    const targetW = (style.vertical ? item.height : item.width) * vp.scale;
+    const font = `${fh}px ${family}`;
+    if (font !== lastFont) { measureCtx.font = font; lastFont = font; }
+    const mw = measureCtx.measureText(item.str).width;
+    let tf = angle ? `rotate(${angle}rad)` : '';
+    if (mw > 0 && targetW > 0) tf += ` scaleX(${targetW / mw})`;
+    if (tf) div.style.transform = tf;
+
+    layer.append(div);
+  }
+  return layer;
+}
+
+function applyLayout() {
+  const anchor = captureAnchor();
+  for (const p of pages) {
+    sizeWrapper(p);
+    if (p.rendered || p.rendering) unrenderPage(p);
+    if (p.want) renderPage(p);
+  }
+  restoreAnchor(anchor);
+  els.zoomLabel.textContent = Math.round(zoomSteps[zoomIdx] * 100) + '%';
+  els.zoomOut.disabled = zoomIdx === 0;
+  els.zoomIn.disabled = zoomIdx === zoomSteps.length - 1;
+}
+
+function captureAnchor() {
+  const top = els.toolbar.offsetHeight;
+  for (const p of pages) {
+    const r = p.wrapper.getBoundingClientRect();
+    if (r.bottom > top + 1) return { p, frac: (top - r.top) / (r.height || 1) };
+  }
+  return null;
+}
+function restoreAnchor(a) {
+  if (!a) return;
+  const top = els.toolbar.offsetHeight;
+  const r = a.p.wrapper.getBoundingClientRect();
+  window.scrollTo(0, window.scrollY + r.top + a.frac * r.height - top);
+}
+
+/* =====================================================================
+ * 3. 하이라이트 / 자동 스크롤
+ * ===================================================================== */
+let active = -1;          // 현재 읽는 단어 토큰
+let sentIdx = null;       // 현재 문장(청크)의 토큰 목록
+let pendingScroll = false;
+let lastUserScroll = 0;
+const lit = new Set();
+
+['wheel', 'touchmove'].forEach(ev =>
+  window.addEventListener(ev, () => { lastUserScroll = Date.now(); }, { passive: true }));
+
+function setActive(ti, chunk) {
+  active = ti;
+  if (chunk !== undefined) sentIdx = chunk ? chunk.idx : null;
+  applyHighlight(true);
+  showPlayStatus();
+}
+
+function clearHighlight() {
+  active = -1; sentIdx = null; pendingScroll = false;
+  for (const el of lit) el.classList.remove('active', 'sent');
+  lit.clear();
+}
+
+function applyHighlight(scroll) {
+  for (const el of lit) el.classList.remove('active', 'sent');
+  lit.clear();
+  if (active < 0) return;
+  if (sentIdx) {
+    for (const i of sentIdx) {
+      const el = tokens[i].el;
+      if (el) { el.classList.add('sent'); lit.add(el); }
+    }
+  }
+  const t = tokens[active];
+  if (!t) return;
+  const mark = tk => { if (tk && tk.el) { tk.el.classList.add('active'); lit.add(tk.el); } };
+  for (let k = active; k < tokens.length; k++) {      // 줄바꿈으로 갈라진 한 단어는 함께 칠한다
+    mark(tokens[k]);
+    if (!tokens[k].joined) break;
+  }
+
+  if (t.el) {
+    pendingScroll = false;
+    if (scroll) keepVisible(t.el);
+  } else if (scroll && Date.now() - lastUserScroll > 3000) {
+    pendingScroll = true;
+    scrollToPage(t.p);
+  }
+}
+
+function keepVisible(el) {
+  if (Date.now() - lastUserScroll < 3000) return;
+  const r = el.getBoundingClientRect();
+  const top = els.toolbar.offsetHeight + 24;
+  if (r.top < top || r.bottom > window.innerHeight * 0.8) {
+    window.scrollTo({ top: window.scrollY + r.top - window.innerHeight * 0.35, behavior: 'smooth' });
+  }
+}
+
+function scrollToPage(pi) {
+  const r = pages[pi].wrapper.getBoundingClientRect();
+  window.scrollTo(0, window.scrollY + r.top - els.toolbar.offsetHeight - 8);
+}
+
+function firstVisibleToken() {
+  const top = els.toolbar.offsetHeight + 4;
+  for (const p of pages) {
+    if (p.wrapper.getBoundingClientRect().bottom <= top) continue;
+    for (let i = p.tokStart; i < p.tokEnd; i++) {
+      const el = tokens[i].el;
+      if (el && el.getBoundingClientRect().top >= top) return i;
+    }
+    if (p.tokEnd > p.tokStart) return p.tokStart;
+  }
+  return 0;
+}
+
+/* =====================================================================
+ * 4. 음성 재생
+ *    - 문장(청크) 단위 utterance 를 1개 앞서 대기열에 넣어 끊김 없이 이어 읽음
+ *    - 일시정지 = cancel + 위치 기억 (브라우저별 pause/resume 버그 회피)
+ *    - gen 값으로 이전 utterance 의 늦은 이벤트를 무시
+ * ===================================================================== */
+const MAX_SOFT = 180, MAX_HARD = 300;
+let state = 'idle';       // idle | playing | paused
+let cursor = 0;           // 읽는 중(또는 이어 읽을) 단어 토큰
+let gen = 0;
+let nextFrom = 0;
+let queued = 0;
+let currentChunk = null;
+let watchTimer = 0;
+let noBoundaryNote = '';
+const live = new Set();   // utterance 가 GC 되어 이벤트가 사라지는 문제 방지
+
+function buildChunk(from) {
+  const skipEdges = els.edges.checked;
+  let i = from;
+  while (i < tokens.length && skipEdges && tokens[i].edge) i++;
+  if (i >= tokens.length) return null;
+
+  const idx = [], offs = [];
+  let text = '', gap = false;
+  for (; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (skipEdges && t.edge) { gap = true; continue; }
+    if (gap && idx.length && !/\s$/.test(text) && !tokens[idx[idx.length - 1]].joined) text += ' ';
+    gap = false;
+    idx.push(i);
+    offs.push(text.length);
+    text += t.speak + t.sep;
+    if (t.end) { i++; break; }
+    if (text.length > MAX_SOFT && /[,;:、，；：)]$/.test(t.speak)) { i++; break; }
+    if (text.length > MAX_HARD) { i++; break; }
+  }
+  return { idx, offs, text, first: idx[0], next: i };
+}
+
+function detectLang(text) {
+  const n = re => (text.match(re) || []).length;
+  const ko = n(/[가-힣ᄀ-ᇿ㄰-㆏]/g);
+  const ja = n(/[぀-ヿ]/g);
+  const han = n(/[一-鿿]/g);
+  const lat = n(/[A-Za-z]/g);
+  const all = ko + ja + han + lat;
+  if (!all) return navigator.language || 'ko-KR';
+  if (ja >= all * 0.1) return 'ja-JP';
+  if (ko >= all * 0.2) return 'ko-KR';
+  if (han > lat) return 'zh-CN';
+  return 'en-US';
+}
+
+let voices = [];
+const voiceCache = new Map();
+
+function loadVoices() {
+  if (!synth) return;
+  voices = synth.getVoices().slice();
+  voiceCache.clear();
+  const cur = els.voice.value && els.voice.options.length > 1 ? els.voice.value : store.get('voice', 'auto');
+  els.voice.length = 1;
+  const rank = v => /^ko/i.test(v.lang) ? 0 : /^en/i.test(v.lang) ? 1 : 2;
+  [...voices]
+    .sort((a, b) => rank(a) - rank(b) || a.lang.localeCompare(b.lang) || a.name.localeCompare(b.name))
+    .forEach(v => els.voice.add(new Option(
+      `${v.name} (${v.lang})${v.localService ? '' : ' · 온라인'}`, v.voiceURI)));
+  els.voice.value = [...els.voice.options].some(o => o.value === cur) ? cur : 'auto';
+}
+
+function bestVoice(lang) {
+  if (voiceCache.has(lang)) return voiceCache.get(lang);
+  const want = lang.replace('_', '-').toLowerCase();
+  const score = v => (v.lang.replace('_', '-').toLowerCase() === want ? 4 : 0) + (v.localService ? 2 : 0) + (v.default ? 1 : 0);
+  const v = voices
+    .filter(x => x.lang.slice(0, 2).toLowerCase() === want.slice(0, 2))
+    .sort((a, b) => score(b) - score(a))[0];
+  voiceCache.set(lang, v);
+  return v;
+}
+
+function chooseVoice(text) {
+  const sel = els.voice.value;
+  if (sel !== 'auto') {
+    const v = voices.find(x => x.voiceURI === sel);
+    if (v) return { voice: v, lang: v.lang };
+  }
+  const lang = detectLang(text);
+  return { voice: bestVoice(lang), lang };
+}
+
+function cancelSpeech() {
+  gen++;
+  queued = 0;
+  currentChunk = null;
+  clearTimeout(watchTimer);
+  if (synth) { try { synth.cancel(); } catch {} }
+}
+
+function startFrom(idx) {
+  if (!tokens.length || !synth) return;
+  cancelSpeech();
+  cursor = Math.max(0, Math.min(idx, tokens.length - 1));
+  nextFrom = cursor;
+  state = 'playing';
+  noBoundaryNote = '';
+  lastUserScroll = 0;
+  setActive(cursor, null);
+  updateUI();
+  const g = gen;
+  // cancel() 직후 곧바로 speak() 하면 일부 브라우저가 무시하므로 잠깐 대기
+  setTimeout(() => { if (g === gen) pump(g); }, 50);
+}
+
+function pump(g) {
+  while (g === gen && state === 'playing' && queued < 2) {
+    const c = buildChunk(nextFrom);
+    if (!c) { if (queued === 0) finish(); return; }
+    nextFrom = c.next;
+    if (!c.text.trim()) continue;
+    try {
+      speakChunk(c, g);
+    } catch (e) {
+      cancelSpeech();
+      state = 'paused';
+      updateUI();
+      setStatus('음성 재생을 시작하지 못했습니다: ' + (e && e.message ? e.message : e), true);
+      return;
+    }
+  }
+}
+
+function speakChunk(c, g) {
+  const u = new SpeechSynthesisUtterance(c.text);
+  const { voice, lang } = chooseVoice(c.text);
+  if (voice) u.voice = voice;
+  u.lang = voice ? voice.lang : lang;
+  u.rate = parseFloat(els.rate.value) || 1;
+
+  let sawBoundary = false;
+  u.onstart = () => {
+    if (g !== gen) return;
+    clearTimeout(watchTimer);
+    currentChunk = c;
+    cursor = c.first;
+    setActive(c.first, c);
+    if (c.idx.length > 3) {
+      setTimeout(() => { if (g === gen && currentChunk === c && !sawBoundary) flagNoBoundary(); }, 1500);
+    }
+  };
+  u.onboundary = ev => {
+    if (g !== gen || currentChunk !== c) return;
+    if (ev.name && ev.name !== 'word') return;
+    sawBoundary = true;
+    const ti = c.idx[floorIndex(c.offs, ev.charIndex)];
+    cursor = ti;
+    setActive(ti);
+  };
+  u.onend = () => {
+    live.delete(u);
+    if (g !== gen) return;
+    if (!sawBoundary && c.idx.length > 3) flagNoBoundary();
+    queued--;
+    pump(g);
+  };
+  u.onerror = ev => {
+    live.delete(u);
+    if (g !== gen) return;
+    if (ev.error === 'canceled' || ev.error === 'interrupted') return;
+    cancelSpeech();
+    state = 'paused';
+    updateUI();
+    setStatus(`음성 재생 오류: ${ev.error}`, true);
+  };
+
+  live.add(u);
+  queued++;
+  if (queued === 1) {
+    clearTimeout(watchTimer);
+    watchTimer = setTimeout(() => {
+      if (g === gen && !currentChunk) {
+        setStatus('음성이 시작되지 않습니다. 설치된 음성이 없거나 브라우저가 재생을 막았을 수 있습니다.', true);
+      }
+    }, 6000);
+  }
+  synth.speak(u);
+}
+
+function flagNoBoundary() {
+  if (noBoundaryNote) return;
+  noBoundaryNote = ' · 이 음성은 단어 위치를 알려주지 않아 문장 단위로 표시합니다 (로컬 음성을 선택해 보세요)';
+  showPlayStatus();
+}
+
+function showPlayStatus() {
+  if (state !== 'playing') return;
+  const t = tokens[active];
+  const pg = t ? t.p + 1 : 1;
+  setStatus(`재생 중 · ${pg} / ${pages.length} 쪽${noBoundaryNote}`);
+}
+
+function pause() {
+  if (state !== 'playing') return;
+  cancelSpeech();
+  state = 'paused';
+  updateUI();
+  setStatus('일시정지 — ▶ 를 누르면 현재 단어부터 이어 읽습니다.');
+}
+
+function stop() {
+  cancelSpeech();
+  state = 'idle';
+  cursor = 0;
+  clearHighlight();
+  updateUI();
+  if (tokens.length) setStatus('정지됨. ▶ 를 누르면 화면에 보이는 위치부터 읽습니다.');
+}
+
+function finish() {
+  cancelSpeech();
+  state = 'idle';
+  cursor = 0;
+  clearHighlight();
+  updateUI();
+  setStatus('끝까지 읽었습니다.');
+}
+
+function jumpSentence(dir) {
+  if (!tokens.length) return;
+  let k = floorIndex(sentStarts, cursor);
+  if (dir > 0) k++;
+  else if (cursor <= sentStarts[k]) k--;
+  k = Math.max(0, Math.min(k, sentStarts.length - 1));
+  startFrom(sentStarts[k]);
+}
+
+function togglePlay() {
+  if (state === 'playing') pause();
+  else if (state === 'paused') startFrom(cursor);
+  else startFrom(cursor > 0 ? cursor : firstVisibleToken());
+}
+
+function updateUI() {
+  const ready = tokens.length > 0 && !!synth;
+  els.play.disabled = els.stop.disabled = els.prev.disabled = els.next.disabled = !ready;
+  els.play.textContent = state === 'playing' ? '⏸ 일시정지' : state === 'paused' ? '▶ 이어서' : '▶ 재생';
+}
+
+/* =====================================================================
+ * 5. PDF 로드
+ * ===================================================================== */
+function resetDocument() {
+  cancelSpeech();
+  state = 'idle';
+  cursor = 0;
+  clearHighlight();
+  io.disconnect();
+  els.container.replaceChildren();
+  tokens = [];
+  sentStarts = [];
+  pages.length = 0;
+  els.progress.style.width = '0';
+  if (pdfDoc) { pdfDoc.destroy().catch(() => {}); pdfDoc = null; }
+  updateUI();
+}
+
+async function loadPdf(file) {
+  const id = ++loadId;
+  resetDocument();
+  setStatus(`"${file.name}" 여는 중…`);
+
+  let data;
+  try { data = await file.arrayBuffer(); }
+  catch (e) { setStatus('파일을 읽을 수 없습니다.', true); return; }
+  if (id !== loadId) return;
+
+  const task = pdfjsLib.getDocument({ data });
+  task.onPassword = (update, reason) => {
+    const pw = prompt(reason === pdfjsLib.PasswordResponses.INCORRECT_PASSWORD
+      ? '비밀번호가 올바르지 않습니다. 다시 입력하세요.' : '비밀번호가 필요한 PDF입니다.');
+    if (pw === null) task.destroy(); else update(pw);
+  };
+
+  let doc;
+  try { doc = await task.promise; }
+  catch (e) {
+    if (id === loadId) setStatus('PDF를 열 수 없습니다: ' + (e && e.message ? e.message : e), true);
+    return;
+  }
+  if (id !== loadId) { doc.destroy(); return; }
+  pdfDoc = doc;
+
+  try {
+    for (let n = 1; n <= doc.numPages; n++) {
+      const page = await doc.getPage(n);
+      const vp1 = page.getViewport({ scale: 1 });
+      const tc = await page.getTextContent();
+      if (id !== loadId) return;
+
+      const ex = extractPage(n - 1, tc, vp1);
+      const wrapper = document.createElement('div');
+      wrapper.className = 'page';
+      const p = {
+        n, index: n - 1, wrapper, base: { w: vp1.width, h: vp1.height },
+        items: ex.items, styles: tc.styles, tokStart: ex.first, tokEnd: ex.last,
+        scale: 1, gen: 0, want: false, rendered: false, rendering: false, task: null,
+      };
+      wrapper._page = p;
+      sizeWrapper(p);
+      pages.push(p);
+      els.container.append(wrapper);
+      io.observe(wrapper);
+
+      els.progress.style.width = (n / doc.numPages * 100) + '%';
+      if (n === 1 || n % 10 === 0) setStatus(`텍스트 분석 중… ${n} / ${doc.numPages} 쪽`);
+    }
+  } catch (e) {
+    if (id === loadId) setStatus('PDF 분석 중 오류: ' + (e && e.message ? e.message : e), true);
+    return;
+  }
+
+  markEdges();
+  computeSentences();
+  els.progress.style.width = '0';
+  updateUI();
+  els.zoomLabel.textContent = Math.round(zoomSteps[zoomIdx] * 100) + '%';
+  if (!tokens.length) {
+    setStatus('읽을 수 있는 텍스트가 없습니다. 스캔 이미지 PDF라면 먼저 OCR이 필요합니다.', true);
+  } else {
+    setStatus(`준비 완료 · ${doc.numPages}쪽 · ${tokens.length.toLocaleString()}단어. ▶ 를 누르거나 읽을 단어를 클릭하세요.`);
+  }
+}
+
+/* =====================================================================
+ * 6. 이벤트 연결
+ * ===================================================================== */
+els.input.addEventListener('change', e => {
+  const f = e.target.files[0];
+  e.target.value = '';           // 같은 파일을 다시 선택해도 change 가 발생하도록
+  if (f) loadPdf(f);
+});
+
+els.play.addEventListener('click', togglePlay);
+els.stop.addEventListener('click', stop);
+els.prev.addEventListener('click', () => jumpSentence(-1));
+els.next.addEventListener('click', () => jumpSentence(+1));
+
+function restartIfPlaying() { if (state === 'playing') startFrom(cursor); }
+els.rate.addEventListener('change', () => { store.set('rate', els.rate.value); restartIfPlaying(); });
+els.voice.addEventListener('change', () => { store.set('voice', els.voice.value); restartIfPlaying(); });
+els.edges.addEventListener('change', () => { store.set('edges', els.edges.checked ? '1' : '0'); restartIfPlaying(); });
+
+els.zoomIn.addEventListener('click', () => { zoomIdx = Math.min(zoomSteps.length - 1, zoomIdx + 1); store.set('zoom', zoomIdx); applyLayout(); });
+els.zoomOut.addEventListener('click', () => { zoomIdx = Math.max(0, zoomIdx - 1); store.set('zoom', zoomIdx); applyLayout(); });
+
+els.container.addEventListener('click', e => {
+  const w = e.target.closest && e.target.closest('.w');
+  if (!w) return;
+  if (String(window.getSelection()).trim()) return;     // 드래그 선택은 재생으로 취급하지 않음
+  startFrom(+w.dataset.t);
+});
+
+document.addEventListener('keydown', e => {
+  const tag = e.target.tagName;
+  if (tag === 'SELECT' || tag === 'INPUT' || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === ' ' && tag !== 'BUTTON') { e.preventDefault(); togglePlay(); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); jumpSentence(+1); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); jumpSentence(-1); }
+  else if (e.key === 'Escape') stop();
+});
+
+// 드래그 앤 드롭
+let dragDepth = 0;
+window.addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; document.body.classList.add('dragging'); });
+window.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dragging'); } });
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  dragDepth = 0;
+  document.body.classList.remove('dragging');
+  const f = e.dataTransfer && e.dataTransfer.files[0];
+  if (f && (f.type === 'application/pdf' || /\.pdf$/i.test(f.name))) loadPdf(f);
+});
+
+let resizeTimer = 0, lastW = els.container.clientWidth;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    const w = els.container.clientWidth;
+    if (w !== lastW && pages.length) { lastW = w; applyLayout(); }
+  }, 250);
+});
+
+window.addEventListener('pagehide', () => { if (synth) synth.cancel(); });
+
+/* 초기 설정 복원 */
+els.rate.value = store.get('rate', '1');
+if (!els.rate.value) els.rate.value = '1';
+els.edges.checked = store.get('edges', '1') === '1';
+els.zoomLabel.textContent = Math.round(zoomSteps[zoomIdx] * 100) + '%';
+if (synth) {
+  loadVoices();
+  if (synth.addEventListener) synth.addEventListener('voiceschanged', loadVoices);
+  else synth.onvoiceschanged = loadVoices;
+}
+updateUI();
+})();
+</script>
+</body>
+</html>
