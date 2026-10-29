@@ -72,6 +72,20 @@
   .ti { position: absolute; white-space: pre; line-height: 1; color: transparent; transform-origin: 0 0; cursor: inherit; }
   .ti::selection { background: rgba(59,130,246,.35); color: transparent; }
 
+  dialog { background: var(--bar); color: var(--fg); border: 1px solid var(--btn-border); border-radius: 10px; padding: 18px 20px; width: min(560px, 94vw); }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
+  dialog h3 { margin: 0 0 12px; font-size: 16px; }
+  dialog label.col { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--dim); margin-bottom: 10px; }
+  dialog input[type="text"] { cursor: text; background: #15181a; width: 100%; }
+  dialog .row { display: flex; gap: 14px; flex-wrap: wrap; }
+  dialog .row label.col { flex: 1 1 160px; }
+  dialog .hint { font-size: 12px; color: var(--dim); line-height: 1.5; margin: 0 0 12px; }
+  dialog code { background: #15181a; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  dialog pre { background: #15181a; border-radius: 6px; padding: 8px 10px; font-size: 12px; line-height: 1.5; max-height: 200px; overflow: auto; white-space: pre-wrap; margin: 0 0 12px; display: none; }
+  dialog pre.on { display: block; }
+  dialog .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  dialog .actions .sp { flex: 1; }
+
   body.dragging::after {
     content: "PDF를 여기에 놓으세요"; position: fixed; inset: 0; z-index: 200;
     display: grid; place-items: center; font-size: 28px;
@@ -134,9 +148,16 @@
           <option value="1.5">1.5x</option><option value="1.75">1.75x</option><option value="2">2.0x</option>
         </select>
       </label>
+      <label class="field">엔진
+        <select id="select-engine">
+          <option value="web">브라우저 음성</option>
+          <option value="kokoro">Kokoro (고품질)</option>
+        </select>
+      </label>
       <label class="field">음성
         <select id="select-voice"><option value="auto">자동 (영어)</option></select>
       </label>
+      <button id="btn-settings" title="Kokoro 모델 경로 등 설정" aria-label="설정">⚙</button>
       <label class="chk" title="페이지 위·아래의 머리글, 바닥글, 쪽번호를 읽지 않습니다">
         <input type="checkbox" id="chk-edges" checked> 머리글·쪽번호 제외
       </label>
@@ -147,6 +168,47 @@
 </header>
 
 <main id="pdf-container"></main>
+
+<dialog id="dlg-settings">
+  <form method="dialog">
+    <h3>Kokoro 음성 엔진 설정</h3>
+    <label class="col">모델 폴더 경로
+      <input type="text" id="kk-base" placeholder="./kokoro/" autocomplete="off" spellcheck="false">
+    </label>
+    <p class="hint">
+      이 HTML 파일 기준 상대 경로(기본 <code>./kokoro/</code>)나 <code>http(s)://</code> 주소를 넣으세요.
+      폴더 안에는 Hugging Face 저장소 <code>onnx-community/Kokoro-82M-v1.0-ONNX</code>와 같은 구조로
+      <code>config.json</code>, <code>tokenizer.json</code>, <code>tokenizer_config.json</code>,
+      <code>onnx/model_quantized.onnx</code>, <code>voices/*.bin</code> 이 있어야 합니다.
+      웹 서버(http/https)로 열어야 모델을 읽을 수 있습니다.
+    </p>
+    <div class="row">
+      <label class="col">장치
+        <select id="kk-device">
+          <option value="auto">자동 (WebGPU 가능하면 사용)</option>
+          <option value="webgpu">WebGPU</option>
+          <option value="wasm">CPU (WASM)</option>
+        </select>
+      </label>
+      <label class="col">모델 정밀도
+        <select id="kk-dtype">
+          <option value="auto">자동</option>
+          <option value="q8">q8 · model_quantized.onnx (권장, 약 92MB)</option>
+          <option value="fp16">fp16 · model_fp16.onnx</option>
+          <option value="fp32">fp32 · model.onnx (WebGPU용)</option>
+        </select>
+      </label>
+    </div>
+    <pre id="kk-check"></pre>
+    <div class="actions">
+      <button type="button" id="kk-test">모델 확인</button>
+      <button type="button" id="kk-clear" title="브라우저에 저장된 모델/음성 캐시를 지웁니다">캐시 비우기</button>
+      <span class="sp"></span>
+      <button value="cancel">닫기</button>
+      <button type="button" id="kk-save" class="primary">저장</button>
+    </div>
+  </form>
+</dialog>
 
 <script>
 (() => {
@@ -159,6 +221,7 @@ const els = {
   zoomIn: $('btn-zoom-in'), zoomOut: $('btn-zoom-out'), zoomSel: $('zoom-select'), zoomEff: $('zoom-eff'),
   prev: $('btn-prev'), play: $('btn-play'), stop: $('btn-stop'), next: $('btn-next'), locate: $('btn-locate'),
   rate: $('select-rate'), voice: $('select-voice'), edges: $('chk-edges'),
+  engine: $('select-engine'), settings: $('btn-settings'), dlg: $('dlg-settings'),
   status: $('status'), progress: $('progress').firstElementChild, container: $('pdf-container'),
 };
 
@@ -953,21 +1016,47 @@ function buildChunk(from) {
 
 let voices = [];
 let bestEnVoice;
+let engine = store.get('engine', 'web') === 'kokoro' ? 'kokoro' : 'web';   // 설정된 엔진
+let playEngine = 'web';                                                      // 지금 재생 중인 엔진
+let engineDirty = false;                                                     // 일시정지 중 속도/음성이 바뀜
 
-function loadVoices() {
+// Kokoro 영어 음성 (이름, 설명, 품질 등급) — 등급 C 이상만 제공
+const KOKORO_VOICES = [
+  ['af_heart', 'Heart · 미국 여성', 'A'], ['af_bella', 'Bella · 미국 여성', 'A-'], ['af_nicole', 'Nicole · 미국 여성', 'B-'],
+  ['bf_emma', 'Emma · 영국 여성', 'B-'], ['af_aoede', 'Aoede · 미국 여성', 'C+'], ['af_kore', 'Kore · 미국 여성', 'C+'],
+  ['af_sarah', 'Sarah · 미국 여성', 'C+'], ['am_fenrir', 'Fenrir · 미국 남성', 'C+'], ['am_michael', 'Michael · 미국 남성', 'C+'],
+  ['am_puck', 'Puck · 미국 남성', 'C+'], ['af_alloy', 'Alloy · 미국 여성', 'C'], ['af_nova', 'Nova · 미국 여성', 'C'],
+  ['bf_isabella', 'Isabella · 영국 여성', 'C'], ['bm_george', 'George · 영국 남성', 'C'], ['bm_fable', 'Fable · 영국 남성', 'C'],
+  ['af_sky', 'Sky · 미국 여성', 'C-'],
+];
+
+function loadVoices() {                 // Web Speech 음성 목록
   if (!synth) return;
   const all = synth.getVoices().slice();
   const en = all.filter(v => /^en([-_]|$)/i.test(v.lang));
   voices = en.length ? en : all;
   bestEnVoice = undefined;
-  const cur = els.voice.options.length > 1 ? els.voice.value : store.get('voice', 'auto');
-  els.voice.length = 1;
+  refreshVoiceSelect();
+}
+
+function refreshVoiceSelect() {
+  const sel = els.voice;
+  els.engine.value = engine;
+  if (engine === 'kokoro') {
+    const cur = store.get('kvoice', 'af_heart');
+    sel.length = 0;
+    for (const [id, label, grade] of KOKORO_VOICES) sel.add(new Option(`${label} (${grade})`, id));
+    sel.value = KOKORO_VOICES.some(v => v[0] === cur) ? cur : 'af_heart';
+    return;
+  }
+  const cur = store.get('voice', 'auto');
+  sel.length = 0;
+  sel.add(new Option('자동 (영어)', 'auto'));
   const rank = v => /^en[-_]US/i.test(v.lang) ? 0 : /^en[-_]GB/i.test(v.lang) ? 1 : 2;
   [...voices]
     .sort((a, b) => rank(a) - rank(b) || a.lang.localeCompare(b.lang) || a.name.localeCompare(b.name))
-    .forEach(v => els.voice.add(new Option(
-      `${v.name} (${v.lang})${v.localService ? '' : ' · 온라인'}`, v.voiceURI)));
-  els.voice.value = [...els.voice.options].some(o => o.value === cur) ? cur : 'auto';
+    .forEach(v => sel.add(new Option(`${v.name} (${v.lang})${v.localService ? '' : ' · 온라인'}`, v.voiceURI)));
+  sel.value = [...sel.options].some(o => o.value === cur) ? cur : 'auto';
 }
 
 function pickVoice() {
@@ -986,6 +1075,7 @@ function pickVoice() {
 
 function cancelSpeech() {
   gen++;
+  kokoroStop();
   queued = 0;
   currentChunk = null;
   clearTimeout(watchTimer);
@@ -993,7 +1083,7 @@ function cancelSpeech() {
 }
 
 function startFrom(idx) {
-  if (!tokens.length || !synth) return;
+  if (!tokens.length || (engine === 'web' && !synth)) return;
   cancelSpeech();
   cursor = clamp(idx, 0, tokens.length - 1);
   nextFrom = cursor;
@@ -1003,6 +1093,13 @@ function startFrom(idx) {
   setActive(cursor, null);
   updateUI();
   const g = gen;
+  playEngine = engine;
+  engineDirty = false;
+  if (playEngine === 'kokoro') {
+    try { audioCtx().resume(); } catch {}     // 사용자 클릭 시점에 오디오를 연다
+    kokoroPlay(g);
+    return;
+  }
   // cancel() 직후 곧바로 speak() 하면 일부 브라우저가 무시하므로 잠깐 대기
   setTimeout(() => { if (g === gen) pump(g); }, 50);
 }
@@ -1095,6 +1192,13 @@ function showPlayStatus() {
 
 function pause() {
   if (state !== 'playing') return;
+  if (playEngine === 'kokoro' && actx) {        // 합성된 오디오는 그대로 두고 일시정지/재개
+    actx.suspend();
+    state = 'paused';
+    updateUI();
+    setStatus('일시정지 — ▶ 를 누르면 이어서 읽습니다.');
+    return;
+  }
   cancelSpeech();
   state = 'paused';
   updateUI();
@@ -1130,7 +1234,10 @@ function jumpSentence(dir) {
 
 function togglePlay() {
   if (state === 'playing') pause();
-  else if (state === 'paused') startFrom(cursor);
+  else if (state === 'paused') {
+    if (playEngine === 'kokoro' && !engineDirty && engine === 'kokoro' && actx) { actx.resume(); state = 'playing'; updateUI(); showPlayStatus(); }
+    else startFrom(cursor);
+  }
   else startFrom(cursor > 0 ? cursor : firstVisibleToken());
 }
 
@@ -1153,6 +1260,321 @@ function updateUI() {
   els.locate.disabled = !ready || active < 0;
   els.play.textContent = state === 'playing' ? '⏸ 일시정지' : state === 'paused' ? '▶ 이어서' : '▶ 재생';
 }
+
+/* =====================================================================
+ * 6b. Kokoro 엔진 (브라우저 안에서 도는 신경망 TTS)
+ *     - 모델/라이브러리는 이 HTML 옆 폴더(또는 설정한 경로)에서 읽는다
+ *     - 합성은 Web Worker 에서 해서 화면이 멈추지 않는다
+ *     - Kokoro 는 단어 시각을 주지 않으므로, 문장 안에서 글자 수 비율로 추정한다
+ * ===================================================================== */
+const KK_REPO = 'onnx-community/Kokoro-82M-v1.0-ONNX';
+const KK_MODEL_FILES = { fp32: 'onnx/model.onnx', fp16: 'onnx/model_fp16.onnx', q8: 'onnx/model_quantized.onnx' };
+const kk = { worker: null, ready: null, info: null, seq: 0, pending: new Map(), progress: new Map(), loading: false };
+let actx = null;
+let kkTimeline = [], kkLastEnd = 0, kkProducerDone = false, kkTicker = 0, kkCur = null;
+const kkSources = new Set();
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const vendorURL = rel => new URL('vendor/' + rel, location.href).href;
+function normBase(v) {
+  v = (v || '').trim() || './kokoro/';
+  if (!v.endsWith('/')) v += '/';
+  return new URL(v, location.href).href;
+}
+function kkSettings() {
+  return { base: normBase(store.get('kkBase', './kokoro/')), device: store.get('kkDevice', 'auto'), dtype: store.get('kkDtype', 'auto') };
+}
+function audioCtx() {
+  if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+  return actx;
+}
+
+/* 파일 존재/크기 확인 (HEAD, 안 되면 Range GET). 서버가 없는 파일에 HTML 을 돌려주는 경우도 걸러낸다 */
+async function probe(url) {
+  try {
+    let r = await fetch(url, { method: 'HEAD' });
+    if (!r.ok && (r.status === 405 || r.status === 501)) r = await fetch(url, { headers: { Range: 'bytes=0-0' } });
+    if (!r.ok) return { ok: false };
+    if (/text\/html/i.test(r.headers.get('content-type') || '') && !/\.html?$/i.test(url)) return { ok: false };
+    const range = r.headers.get('content-range');
+    const size = range ? +range.split('/')[1] : +r.headers.get('content-length') || 0;
+    return { ok: true, size };
+  } catch { return { ok: false }; }
+}
+
+/* ---- Worker (Blob 으로 만들어 단일 HTML 배포를 유지) ---- */
+function kokoroWorkerMain() {
+  const REPO = 'onnx-community/Kokoro-82M-v1.0-ONNX';
+  const HF = 'https://huggingface.co/' + REPO + '/resolve/main/';
+  let base = '', tts = null;
+  const nativeFetch = self.fetch.bind(self);
+  // transformers.js / kokoro-js 는 Hugging Face 주소로 파일을 요청한다 → 설정한 모델 폴더로 돌린다
+  self.fetch = (input, init) => {
+    const url = typeof input === 'string' ? input : (input && input.url) || String(input);
+    if (base) {
+      if (url.startsWith(HF)) return nativeFetch(base + url.slice(HF.length), init);
+      if (url.includes('/models/' + REPO + '/')) return Promise.resolve(new Response(null, { status: 404 }));  // 기본 로컬 경로 시도는 건너뜀
+    }
+    return nativeFetch(input, init);
+  };
+  self.onmessage = async ev => {
+    const m = ev.data;
+    try {
+      if (m.type === 'init') {
+        base = m.base;
+        const mod = await import(m.lib);
+        mod.env.wasmPaths = m.wasm;
+        const load = (device, dtype) => mod.KokoroTTS.from_pretrained(REPO, {
+          device, dtype,
+          progress_callback: p => {
+            if (p && p.status === 'progress' && p.total) self.postMessage({ type: 'progress', file: p.file, loaded: p.loaded, total: p.total });
+          },
+        });
+        let device = m.device, dtype = m.dtype, note = '';
+        try { tts = await load(device, dtype); }
+        catch (e) {
+          if (device !== 'webgpu' || !m.fallbackDtype) throw e;
+          device = 'wasm'; dtype = m.fallbackDtype;
+          note = 'WebGPU 초기화에 실패해 CPU(WASM)로 전환했습니다.';
+          tts = await load(device, dtype);
+        }
+        self.postMessage({ type: 'done', id: m.id, device, dtype, note });
+      } else if (m.type === 'gen') {
+        const out = await tts.generate(m.text, { voice: m.voice, speed: m.speed });
+        const audio = out.audio.slice();
+        self.postMessage({ type: 'done', id: m.id, audio, sr: out.sampling_rate }, [audio.buffer]);
+      }
+    } catch (err) {
+      self.postMessage({ type: 'fail', id: m.id, error: String((err && err.message) || err) });
+    }
+  };
+}
+
+function kkSend(msg) {
+  return new Promise((resolve, reject) => {
+    const id = ++kk.seq;
+    kk.pending.set(id, { resolve, reject });
+    kk.worker.postMessage({ ...msg, id });
+  });
+}
+
+function kkWorkerMessage(ev) {
+  const m = ev.data;
+  if (m.type === 'progress') {
+    if (!kk.loading) return;
+    kk.progress.set(m.file, [m.loaded, m.total]);
+    let l = 0, t = 0;
+    for (const [a, b] of kk.progress.values()) { l += a; t += b; }
+    setStatus(`Kokoro 모델 불러오는 중… ${Math.round(l / t * 100)}% (${(l / 1048576).toFixed(0)} / ${(t / 1048576).toFixed(0)} MB)`);
+    return;
+  }
+  const p = kk.pending.get(m.id);
+  if (!p) return;
+  kk.pending.delete(m.id);
+  if (m.type === 'done') p.resolve(m); else p.reject(new Error(m.error));
+}
+
+function kokoroReset() {
+  if (kk.worker) { kk.worker.terminate(); kk.worker = null; }
+  for (const p of kk.pending.values()) p.reject(new Error('Kokoro 엔진이 초기화되었습니다.'));
+  kk.pending.clear();
+  kk.ready = null;
+  kk.info = null;
+  kk.loading = false;
+}
+
+async function kokoroInit() {
+  if (kk.ready) return kk.ready;
+  kk.ready = (async () => {
+    if (location.protocol === 'file:') {
+      throw new Error('file:// 로 연 페이지는 모델 파일을 읽을 수 없습니다. 웹 서버로 여세요 (예: 이 폴더에서 python3 -m http.server)');
+    }
+    const cfg = kkSettings();
+    if (!(await probe(vendorURL('kokoro.web.js'))).ok) throw new Error('vendor/kokoro.web.js 를 찾을 수 없습니다. vendor 폴더를 HTML 옆에 두세요.');
+    if (!(await probe(cfg.base + 'config.json')).ok) throw new Error(`모델 폴더를 찾을 수 없습니다: ${cfg.base}`);
+    const have = {};
+    for (const k of Object.keys(KK_MODEL_FILES)) have[k] = (await probe(cfg.base + KK_MODEL_FILES[k])).ok;
+
+    let device = cfg.device, dtype = cfg.dtype;
+    if (device === 'auto') device = navigator.gpu && have.fp32 ? 'webgpu' : 'wasm';
+    if (device === 'webgpu' && !navigator.gpu) device = 'wasm';
+    if (dtype === 'auto') dtype = device === 'webgpu' ? 'fp32' : ['q8', 'fp16', 'fp32'].find(k => have[k]);
+    if (!dtype || !have[dtype]) throw new Error(`모델 파일이 없습니다: ${cfg.base}${KK_MODEL_FILES[dtype || 'q8']}`);
+    const fallbackDtype = ['q8', 'fp16'].find(k => have[k]) || null;
+
+    kk.progress.clear();
+    kk.loading = true;
+    setStatus('Kokoro 모델 불러오는 중…');
+    const src = '(' + kokoroWorkerMain.toString() + ')()';
+    kk.worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })), { type: 'module' });
+    kk.worker.onmessage = kkWorkerMessage;
+    kk.worker.onerror = e => {
+      for (const p of kk.pending.values()) p.reject(new Error(e.message || 'Kokoro 작업자 오류'));
+      kk.pending.clear();
+    };
+    try {
+      kk.info = await kkSend({ type: 'init', base: cfg.base, lib: vendorURL('kokoro.web.js'), wasm: vendorURL('ort/'), device, dtype, fallbackDtype });
+    } finally { kk.loading = false; }
+    return kk.info;
+  })();
+  try { return await kk.ready; }
+  catch (e) { kokoroReset(); throw e; }
+}
+
+function kokoroStop() {
+  clearInterval(kkTicker);
+  kkTicker = 0;
+  for (const s of kkSources) { try { s.onended = null; s.stop(); } catch {} }
+  kkSources.clear();
+  kkTimeline = [];
+  kkCur = null;
+  kkProducerDone = false;
+  kkLastEnd = 0;
+}
+
+function kokoroFail(e) {
+  cancelSpeech();
+  state = 'idle';
+  engine = 'web';                      // 이번 세션만 브라우저 음성으로 되돌린다 (저장된 설정은 유지)
+  refreshVoiceSelect();
+  updateUI();
+  setStatus(`Kokoro 오류: ${e && e.message ? e.message : e} → 브라우저 음성으로 전환했습니다. ⚙ 에서 모델 경로를 확인하세요.`, true);
+}
+
+/* 합성된 문장을 앞뒤 무음을 잘라 예약 재생하고, 단어별 시작 시각을 추정해 둔다 */
+function kkSchedule(ctx, c, out) {
+  const a = out.audio, sr = out.sr, TH = 0.004;
+  let s = 0, e = a.length - 1;
+  while (s < e && Math.abs(a[s]) < TH) s++;
+  while (e > s && Math.abs(a[e]) < TH) e--;
+  s = Math.max(0, s - Math.round(sr * 0.02));
+  e = Math.min(a.length - 1, e + Math.round(sr * 0.04));
+  if (e <= s) return;
+  const buf = ctx.createBuffer(1, e - s + 1, sr);
+  buf.getChannelData(0).set(a.subarray(s, e + 1));
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+  const start = Math.max(ctx.currentTime + 0.05, kkLastEnd);
+  src.start(start);
+  kkSources.add(src);
+  src.onended = () => kkSources.delete(src);
+
+  const dur = buf.duration;
+  const w = c.idx.map(i => {
+    const sp = tokens[i].speak;
+    return Math.max(1, sp.length) + (/[,;:]$/.test(sp) ? 2.5 : /[.!?…]["'”’)\]]*$/.test(sp) ? 3 : 0);
+  });
+  const total = w.reduce((x, y) => x + y, 0);
+  const tOff = [];
+  let acc = 0;
+  for (const x of w) { tOff.push(dur * acc / total); acc += x; }
+  const last = tokens[c.idx[c.idx.length - 1]];
+  kkTimeline.push({ c, start, end: start + dur, tOff });
+  kkLastEnd = start + dur + (last.para ? 0.38 : last.end ? 0.14 : 0.05);
+}
+
+function kkTick(g) {
+  if (g !== gen || !actx || state === 'paused') return;     // 일시정지 중에는 위치를 바꾸지 않는다
+  const now = actx.currentTime;
+  let cur = null;
+  for (let i = kkTimeline.length - 1; i >= 0; i--) if (kkTimeline[i].start <= now) { cur = kkTimeline[i]; break; }
+  if (cur) {
+    while (kkTimeline.length > 3 && kkTimeline[0] !== cur) kkTimeline.shift();     // 지난 항목 정리
+    if (cur !== kkCur) { kkCur = cur; cursor = cur.c.first; setActive(cur.c.first, cur.c); }
+    const ti = cur.c.idx[floorIndex(cur.tOff, now - cur.start)];
+    if (ti !== active) { cursor = ti; setActive(ti); }
+  } else if (!kkProducerDone && state === 'playing' && now >= kkLastEnd) {
+    setStatus('Kokoro 음성 합성 중…');
+  }
+  if (kkProducerDone && state === 'playing' && now >= kkLastEnd + 0.02) finish();
+}
+
+async function kokoroPlay(g) {
+  try {
+    setStatus('Kokoro 음성 엔진 준비 중…');
+    await kokoroInit();
+    if (g !== gen) return;
+    if (kk.info && kk.info.note) setStatus(kk.info.note);
+    const ctx = audioCtx();
+    if (ctx.state === 'suspended') await ctx.resume();
+    kkTimeline = []; kkLastEnd = 0; kkProducerDone = false; kkCur = null;
+    clearInterval(kkTicker);
+    kkTicker = setInterval(() => kkTick(g), 40);
+
+    const voice = els.voice.value || 'af_heart';
+    const speed = parseFloat(els.rate.value) || 1;
+    while (g === gen) {
+      while (g === gen && kkLastEnd - ctx.currentTime > 6) await sleep(120);     // 너무 앞서 합성하지 않는다
+      if (g !== gen) return;
+      const c = buildChunk(nextFrom);
+      if (!c) break;
+      nextFrom = c.next;
+      if (!c.text.trim()) continue;
+      const out = await kkSend({ type: 'gen', text: c.text, voice, speed });
+      if (g !== gen) return;
+      kkSchedule(ctx, c, out);
+    }
+    if (g === gen) kkProducerDone = true;
+  } catch (e) {
+    if (g === gen) kokoroFail(e);
+  }
+}
+
+/* ---- 설정 창 ---- */
+const fmtSize = n => !n ? '' : n > 1048576 ? ` (${(n / 1048576).toFixed(1)} MB)` : ` (${Math.max(1, Math.round(n / 1024))} KB)`;
+
+function openSettings() {
+  $('kk-base').value = store.get('kkBase', './kokoro/');
+  $('kk-device').value = store.get('kkDevice', 'auto');
+  $('kk-dtype').value = store.get('kkDtype', 'auto');
+  $('kk-check').className = '';
+  els.dlg.showModal();
+}
+
+async function checkModel() {
+  const out = $('kk-check');
+  out.className = 'on';
+  out.textContent = '확인 중…';
+  const base = normBase($('kk-base').value);
+  const voice = engine === 'kokoro' ? els.voice.value : store.get('kvoice', 'af_heart');
+  const rows = [
+    ['모델 폴더', base], ['config.json', base + 'config.json'], ['tokenizer.json', base + 'tokenizer.json'],
+    ['tokenizer_config.json', base + 'tokenizer_config.json'],
+    ...Object.entries(KK_MODEL_FILES).map(([k, f]) => [f + (k === 'q8' ? '  (권장)' : ''), base + f, true]),
+    [`voices/${voice}.bin`, base + `voices/${voice}.bin`],
+    ['vendor/kokoro.web.js', vendorURL('kokoro.web.js')],
+    ['vendor/ort/…jsep.wasm', vendorURL('ort/ort-wasm-simd-threaded.jsep.wasm')],
+    ['vendor/ort/…jsep.mjs', vendorURL('ort/ort-wasm-simd-threaded.jsep.mjs')],
+  ];
+  const lines = [];
+  if (location.protocol === 'file:') lines.push('⚠ file:// 로 열려 있습니다. 웹 서버로 열어야 모델을 읽을 수 있습니다.');
+  lines.push(`장치: WebGPU ${navigator.gpu ? '사용 가능' : '없음'} · 멀티스레드 ${window.crossOriginIsolated ? '가능' : '불가(단일 스레드)'}`);
+  for (const [label, url, optional] of rows.slice(1)) {
+    const r = await probe(url);
+    lines.push(`${r.ok ? '✓' : optional ? '–' : '✗'} ${label}${r.ok ? fmtSize(r.size) : optional ? ' (없음 — 선택 사항)' : ' — 없음'}`);
+  }
+  out.textContent = `경로: ${base}\n` + lines.join('\n');
+}
+
+$('kk-test').addEventListener('click', checkModel);
+$('kk-clear').addEventListener('click', async () => {
+  try { await caches.delete('transformers-cache'); await caches.delete('kokoro-voices'); } catch {}
+  const o = $('kk-check'); o.className = 'on'; o.textContent = '저장된 모델/음성 캐시를 지웠습니다.';
+});
+$('kk-save').addEventListener('click', () => {
+  store.set('kkBase', $('kk-base').value.trim() || './kokoro/');
+  store.set('kkDevice', $('kk-device').value);
+  store.set('kkDtype', $('kk-dtype').value);
+  kokoroReset();
+  els.dlg.close();
+  setStatus('Kokoro 설정을 저장했습니다. 다음 재생 때 새 설정으로 모델을 불러옵니다.');
+  if (engine === 'kokoro') {
+    if (state === 'playing') startFrom(cursor); else if (state === 'paused') engineDirty = true;
+    else kokoroInit().catch(kokoroFail);
+  }
+});
+els.settings.addEventListener('click', openSettings);
 
 /* =====================================================================
  * 7. PDF 로드
@@ -1271,9 +1693,16 @@ els.prev.addEventListener('click', () => jumpSentence(-1));
 els.next.addEventListener('click', () => jumpSentence(+1));
 els.locate.addEventListener('click', locate);
 
-function restartIfPlaying() { if (state === 'playing') startFrom(cursor); }
+function restartIfPlaying() { if (state === 'playing') startFrom(cursor); else if (state === 'paused') engineDirty = true; }
 els.rate.addEventListener('change', () => { store.set('rate', els.rate.value); restartIfPlaying(); });
-els.voice.addEventListener('change', () => { store.set('voice', els.voice.value); restartIfPlaying(); });
+els.voice.addEventListener('change', () => { store.set(engine === 'kokoro' ? 'kvoice' : 'voice', els.voice.value); restartIfPlaying(); });
+els.engine.addEventListener('change', () => {
+  engine = els.engine.value === 'kokoro' ? 'kokoro' : 'web';
+  store.set('engine', engine);
+  refreshVoiceSelect();
+  restartIfPlaying();
+  if (engine === 'kokoro' && state !== 'playing') kokoroInit().then(() => setStatus('Kokoro 준비 완료. ▶ 를 눌러 읽기를 시작하세요.')).catch(kokoroFail);   // 미리 불러오기
+});
 els.edges.addEventListener('change', () => { store.set('edges', els.edges.checked ? '1' : '0'); restartIfPlaying(); });
 
 els.container.addEventListener('click', e => {
@@ -1333,7 +1762,9 @@ if (synth) {
   if (synth.addEventListener) synth.addEventListener('voiceschanged', loadVoices);
   else synth.onvoiceschanged = loadVoices;
 }
+refreshVoiceSelect();
 updateUI();
+if (engine === 'kokoro') kokoroInit().catch(kokoroFail);
 })();
 </script>
 </body>

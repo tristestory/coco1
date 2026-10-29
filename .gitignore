@@ -1,0 +1,5 @@
+# Kokoro 모델 본체는 용량이 커서 저장소에 넣지 않는다 (kokoro/README.md 참고)
+kokoro/onnx/*.onnx
+kokoro/config.json
+kokoro/tokenizer.json
+kokoro/tokenizer_config.json
