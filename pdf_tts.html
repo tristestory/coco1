@@ -3,13 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PDF TTS Player</title>
+<title>PDF Reader · TTS</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <style>
   :root {
     --bar: #1e2124;
-    --bar-fg: #e8eaed;
-    --bar-dim: #9aa0a6;
+    --bar-2: #25292d;
+    --fg: #e8eaed;
+    --dim: #9aa0a6;
     --btn: #33383d;
     --btn-border: #4a5056;
     --accent: #3b82f6;
@@ -19,117 +20,129 @@
   html, body { margin: 0; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", Roboto, sans-serif;
-    background: var(--desk);
-    color: var(--bar-fg);
+    background: var(--desk); color: var(--fg);
   }
 
-  /* ===== 툴바 ===== */
-  #toolbar {
+  /* ===== 상단 크롬: 리더 바 + TTS 바 ===== */
+  #chrome {
     position: sticky; top: 0; z-index: 100;
-    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
-    padding: 8px 12px;
-    background: var(--bar);
-    box-shadow: 0 2px 10px rgba(0,0,0,.35);
+    background: var(--bar); box-shadow: 0 2px 10px rgba(0,0,0,.35);
   }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 6px 12px; }
+  #tts-bar { background: var(--bar-2); border-top: 1px solid #333a40; }
   .group { display: flex; align-items: center; gap: 6px; }
-  button, .btn, select {
-    font: inherit; font-size: 14px; color: var(--bar-fg);
+  button, .btn, select, input[type="text"] {
+    font: inherit; font-size: 14px; color: var(--fg);
     background: var(--btn); border: 1px solid var(--btn-border); border-radius: 6px;
-    padding: 7px 12px; cursor: pointer; transition: background .15s, border-color .15s;
+    padding: 6px 11px; cursor: pointer; transition: background .15s, border-color .15s;
   }
   button:hover:not(:disabled), .btn:hover { background: var(--accent); border-color: var(--accent); }
   button:disabled { opacity: .45; cursor: not-allowed; }
   button.primary { background: var(--accent); border-color: var(--accent); min-width: 104px; }
   button.primary:hover:not(:disabled) { filter: brightness(1.12); }
   select { padding: 6px 8px; max-width: 220px; }
-  label.field, label.chk { white-space: nowrap; }
-  label.field { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--bar-dim); }
-  label.chk { display: flex; align-items: center; gap: 5px; font-size: 13px; color: var(--bar-dim); cursor: pointer; }
-  #zoom-label { min-width: 46px; text-align: center; font-size: 13px; color: var(--bar-dim); }
-  #status { flex: 1 1 260px; min-width: 200px; font-size: 13px; color: var(--bar-dim); }
-  #status.err { color: #ff8a80; }
-  #progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: transparent; }
-  #progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+  label.field, label.chk { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--dim); white-space: nowrap; }
+  label.chk { cursor: pointer; }
   input[type="file"] { display: none; }
 
+  #doc-name { max-width: 28vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--dim); }
+  .pager input {
+    width: 54px; text-align: center; cursor: text; background: #15181a; padding: 6px 4px;
+  }
+  .pager input:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
+  #page-total { font-size: 14px; color: var(--dim); min-width: 44px; }
+  #zoom-eff { font-size: 12px; color: var(--dim); min-width: 40px; }
+  #status { flex: 1 1 260px; min-width: 200px; font-size: 13px; color: var(--dim); }
+  #status.err { color: #ff8a80; }
+  #progress { height: 3px; }
+  #progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+
   /* ===== 페이지 ===== */
-  #pdf-container {
-    display: grid; justify-content: safe center; gap: 16px;
-    padding: 16px 12px 60px;
-  }
-  .page {
-    position: relative; background: #fff; overflow: hidden;
-    box-shadow: 0 4px 16px rgba(0,0,0,.35);
-  }
+  #pdf-container { display: grid; justify-content: safe center; gap: 14px; padding: 14px 12px 60px; }
+  .page { position: relative; background: #fff; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,.35); }
   .page canvas { display: block; }
 
-  /* 투명 텍스트 레이어: 글자는 숨기고 단어 박스만 하이라이트에 사용 */
-  .tl { position: absolute; inset: 0; pointer-events: none; }
-  .ti {
-    position: absolute; white-space: pre; line-height: 1;
-    color: transparent; transform-origin: 0 0;
-  }
-  .w { pointer-events: auto; cursor: pointer; border-radius: 3px; }
-  .w:hover { background: rgba(59,130,246,.28); }
-  .w.sent { background: rgba(255,235,59,.24); }
-  .w.active { background: rgba(255,214,0,.72); box-shadow: 0 0 0 1px rgba(255,160,0,.9); }
+  /* 하이라이트 레이어(글자 아래)와 선택용 텍스트 레이어(글자 위) */
+  .hl, .tl { position: absolute; inset: 0; }
+  .hl { pointer-events: none; }
+  .w, .hv { position: absolute; border-radius: 3px; mix-blend-mode: multiply; }
+  .hv { background: rgba(59,130,246,.28); display: none; }
+  .w.sent { background: rgba(255,226,60,.40); }
+  .w.active { background: rgba(255,196,0,.85); box-shadow: 0 0 0 1px rgba(230,140,0,.95); }
+  .ti { position: absolute; white-space: pre; line-height: 1; color: transparent; transform-origin: 0 0; cursor: inherit; }
+  .ti::selection { background: rgba(59,130,246,.35); color: transparent; }
 
   body.dragging::after {
     content: "PDF를 여기에 놓으세요"; position: fixed; inset: 0; z-index: 200;
     display: grid; place-items: center; font-size: 28px;
     background: rgba(30,33,36,.85); border: 3px dashed var(--accent);
   }
-
-  @media (max-width: 640px) {
-    button, .btn, select { padding: 6px 9px; font-size: 13px; }
-    #toolbar { gap: 6px 8px; }
-    select { max-width: 150px; }
+  @media (max-width: 700px) {
+    button, .btn, select, input[type="text"] { padding: 5px 8px; font-size: 13px; }
+    .bar { gap: 6px 8px; padding: 5px 8px; }
+    select { max-width: 140px; }
+    #doc-name { display: none; }
+    label.chk { white-space: normal; max-width: 150px; line-height: 1.2; }
     #status { flex-basis: 100%; font-size: 12px; }
   }
 </style>
 </head>
 <body>
 
-<header id="toolbar">
-  <div class="group">
-    <label class="btn" for="pdf-input">📂 PDF 열기</label>
-    <input type="file" id="pdf-input" accept="application/pdf,.pdf">
-  </div>
+<header id="chrome">
+  <div class="bar" id="reader-bar">
+    <div class="group">
+      <label class="btn" for="pdf-input">📂 열기</label>
+      <input type="file" id="pdf-input" accept="application/pdf,.pdf">
+      <span id="doc-name"></span>
+    </div>
 
-  <div class="group">
-    <button id="btn-prev" title="이전 문장 (←)" aria-label="이전 문장" disabled>⏮</button>
-    <button id="btn-play" class="primary" title="재생/일시정지 (Space)" disabled>▶ 재생</button>
-    <button id="btn-stop" title="정지 (Esc)" aria-label="정지" disabled>⏹</button>
-    <button id="btn-next" title="다음 문장 (→)" aria-label="다음 문장" disabled>⏭</button>
-  </div>
+    <div class="group pager" title="번호를 입력하고 Enter 를 누르면 해당 쪽으로 이동합니다 (단축키: G)">
+      <button id="btn-pg-prev" aria-label="이전 쪽" disabled>▲</button>
+      <input type="text" id="page-input" inputmode="numeric" autocomplete="off" aria-label="현재 쪽" value="" disabled>
+      <span id="page-total">/ –</span>
+      <button id="btn-pg-next" aria-label="다음 쪽" disabled>▼</button>
+    </div>
 
-  <div class="group">
-    <label class="field">속도
-      <select id="select-rate">
-        <option value="0.6">0.6x</option>
-        <option value="0.8">0.8x</option>
-        <option value="1" selected>1.0x</option>
-        <option value="1.25">1.25x</option>
-        <option value="1.5">1.5x</option>
-        <option value="1.75">1.75x</option>
-        <option value="2">2.0x</option>
+    <div class="group">
+      <button id="btn-zoom-out" title="축소" aria-label="축소" disabled>−</button>
+      <select id="zoom-select" aria-label="배율">
+        <option value="width">너비 맞춤</option>
+        <option value="page">쪽 맞춤</option>
+        <option value="50">50%</option><option value="75">75%</option><option value="100">100%</option>
+        <option value="125">125%</option><option value="150">150%</option><option value="200">200%</option>
+        <option value="300">300%</option>
       </select>
-    </label>
-    <label class="field">음성
-      <select id="select-voice"><option value="auto">자동 (언어 감지)</option></select>
-    </label>
-    <label class="chk" title="페이지 위·아래 가장자리의 머리글, 바닥글, 쪽번호를 읽지 않습니다">
-      <input type="checkbox" id="chk-edges" checked> 머리글·쪽번호 제외
-    </label>
+      <button id="btn-zoom-in" title="확대" aria-label="확대" disabled>+</button>
+      <span id="zoom-eff"></span>
+    </div>
   </div>
 
-  <div class="group">
-    <button id="btn-zoom-out" title="축소" aria-label="축소">−</button>
-    <span id="zoom-label">100%</span>
-    <button id="btn-zoom-in" title="확대" aria-label="확대">+</button>
+  <div class="bar" id="tts-bar">
+    <div class="group">
+      <button id="btn-prev" title="이전 문장 (←)" aria-label="이전 문장" disabled>⏮</button>
+      <button id="btn-play" class="primary" title="재생/일시정지 (Space)" disabled>▶ 재생</button>
+      <button id="btn-stop" title="정지 (Esc)" aria-label="정지" disabled>⏹</button>
+      <button id="btn-next" title="다음 문장 (→)" aria-label="다음 문장" disabled>⏭</button>
+      <button id="btn-locate" title="지금 읽는 위치로 이동" aria-label="읽는 위치로 이동" disabled>📍</button>
+    </div>
+    <div class="group">
+      <label class="field">속도
+        <select id="select-rate">
+          <option value="0.6">0.6x</option><option value="0.8">0.8x</option>
+          <option value="1" selected>1.0x</option><option value="1.25">1.25x</option>
+          <option value="1.5">1.5x</option><option value="1.75">1.75x</option><option value="2">2.0x</option>
+        </select>
+      </label>
+      <label class="field">음성
+        <select id="select-voice"><option value="auto">자동 (영어)</option></select>
+      </label>
+      <label class="chk" title="페이지 위·아래의 머리글, 바닥글, 쪽번호를 읽지 않습니다">
+        <input type="checkbox" id="chk-edges" checked> 머리글·쪽번호 제외
+      </label>
+    </div>
+    <div id="status" role="status" aria-live="polite">PDF 파일을 열거나 이 창에 끌어다 놓으세요.</div>
   </div>
-
-  <div id="status" role="status" aria-live="polite">PDF 파일을 선택하거나 이 창에 끌어다 놓으세요.</div>
   <div id="progress"><i></i></div>
 </header>
 
@@ -141,17 +154,20 @@
 
 const $ = id => document.getElementById(id);
 const els = {
-  input: $('pdf-input'), prev: $('btn-prev'), play: $('btn-play'), stop: $('btn-stop'), next: $('btn-next'),
+  chrome: $('chrome'), input: $('pdf-input'), docName: $('doc-name'),
+  pgPrev: $('btn-pg-prev'), pgNext: $('btn-pg-next'), pageInput: $('page-input'), pageTotal: $('page-total'),
+  zoomIn: $('btn-zoom-in'), zoomOut: $('btn-zoom-out'), zoomSel: $('zoom-select'), zoomEff: $('zoom-eff'),
+  prev: $('btn-prev'), play: $('btn-play'), stop: $('btn-stop'), next: $('btn-next'), locate: $('btn-locate'),
   rate: $('select-rate'), voice: $('select-voice'), edges: $('chk-edges'),
-  zoomIn: $('btn-zoom-in'), zoomOut: $('btn-zoom-out'), zoomLabel: $('zoom-label'),
-  status: $('status'), progress: $('progress').firstElementChild, toolbar: $('toolbar'),
-  container: $('pdf-container'),
+  status: $('status'), progress: $('progress').firstElementChild, container: $('pdf-container'),
 };
 
 const store = {
   get(k, d) { try { const v = localStorage.getItem('pdftts.' + k); return v === null ? d : v; } catch { return d; } },
   set(k, v) { try { localStorage.setItem('pdftts.' + k, v); } catch {} },
 };
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const chromeH = () => els.chrome.offsetHeight;
 
 function setStatus(msg, isErr) {
   if (els.status.textContent !== msg) els.status.textContent = msg;
@@ -169,26 +185,21 @@ if (!synth) setStatus('이 브라우저는 음성 합성(Web Speech API)을 지�
 
 /* =====================================================================
  * 1. 문서 모델
- *    tokens  : 문서 전체 단어 목록 (화면 DOM과 분리). el 은 해당 페이지가
- *              렌더링되어 있을 때만 채워진다.
- *    pages   : 페이지별 레이아웃/렌더 상태
+ *    tokens : 문서 전체 단어 목록. el 은 해당 쪽이 화면에 렌더링되어 있을 때만
+ *             채워지는 하이라이트 박스(div)
+ *    pages  : 쪽별 레이아웃/렌더 상태. boxes 는 토큰별 단어 위치(쪽 크기 대비 비율)
  * ===================================================================== */
 let pdfDoc = null;
 let loadId = 0;
 let tokens = [];
 let sentStarts = [];
 const pages = [];
-
-const zoomSteps = [0.6, 0.8, 1, 1.25, 1.5, 2, 2.5];
-let zoomIdx = Math.max(0, Math.min(zoomSteps.length - 1, +store.get('zoom', 2)));
-
 const measureCtx = document.createElement('canvas').getContext('2d');
 
+const PAGENO_RE = /^(?:[-–—]\s*)?(?:page\s*|p\.\s*)?\d{1,4}(?:\s*(?:\/|of)\s*\d{1,4})?(?:\s*[-–—])?$/i;
+const HY_RE = /^[-\u2010\u00AD]$/;
 const BULLET_RE = /^[•●○◦■□▪▫◆◇★☆▶►▷·※✓✔]+$/;
-const END_RE = /[.!?。！？…]["'”’)\]」』）]*$/;
-const PAGENO_RE = /^(?:[-–—]\s*)?(?:page\s*|p\.\s*|쪽\s*)?\d{1,4}(?:\s*(?:\/|of)\s*\d{1,4})?(?:\s*쪽)?(?:\s*[-–—])?$/i;
-const HANGUL_END = /[\uAC00-\uD7A3]$/;
-const HANGUL_START = /^[\uAC00-\uD7A3]/;
+const END_RE = /[.!?…]["'”’)\]]*$/;
 const ABBR_RE = /^(?:[A-Za-z]|Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e|Fig|Eq|Vol|pp|cf|al)\.$/i;
 
 function isSentenceEnd(t) {
@@ -200,7 +211,7 @@ function isSentenceEnd(t) {
   return true;
 }
 
-/* 텍스트 추출: 항목(item) 사이의 공백/줄바꿈/문단/하이픈을 복원해 토큰 생성 */
+/* 텍스트 추출: item 사이의 공백/줄바꿈/문단/하이픈을 복원해 토큰 생성 */
 function extractPage(pi, tc, vp) {
   const list = [];
   for (const raw of tc.items) {
@@ -224,7 +235,6 @@ function extractPage(pi, tc, vp) {
   }
   dys.sort((a, b) => a - b);
   const med = dys.length >= 3 ? dys[dys.length >> 1] : 0;
-  const maxRight = list.reduce((m, g) => g.blank ? m : Math.max(m, g.x + g.w), 0);
 
   const items = [];
   const first = tokens.length;
@@ -255,7 +265,7 @@ function extractPage(pi, tc, vp) {
         const para = dy > ref * 1.5 || Math.abs(g.fh - lf) > lf * 0.15;
         if (lastTok.sep === '') {
           // 하이픈이 별도 item 으로 분리된 경우("word" + "-")와 한 token 에 붙은 경우("word-")를 모두 처리
-          const hyOnly = /^[-\u2010\u00AD]$/.test(lastTok.text);
+          const hyOnly = HY_RE.test(lastTok.text);
           const before = hyOnly && tokens.length > 1 ? tokens[tokens.length - 2] : null;
           const hyphenated = hyOnly
             ? !!before && before.p === lastTok.p && before.sep === '' && /\p{L}$/u.test(before.text)
@@ -264,9 +274,6 @@ function extractPage(pi, tc, vp) {
             lastTok.speak = lastTok.text.replace(/[-\u2010\u00AD]+$/, '');  // 줄 끝 하이픈 → 단어 이어붙임
             lastTok.joined = true;
             if (hyOnly) before.joined = true;
-          } else if (!para && HANGUL_END.test(lastTok.text) && HANGUL_START.test(s.trimStart())
-                     && prev.x + prev.w >= maxRight * 0.93) {
-            lastTok.joined = true;                                      // 한글 단어가 줄 끝에서 꺾인 경우 → 공백 없이 이어붙임
           } else {
             lastTok.sep = ' ';
           }
@@ -351,7 +358,180 @@ function floorIndex(arr, x) {
 }
 
 /* =====================================================================
- * 2. 렌더링 (지연 렌더 + 텍스트 레이어)
+ * 2. 단어 위치 분석
+ *    PDF 가 알려주는 글자 폭/위치는 PDF 마다 크게 다르다(특히 스캔+OCR, 대체 글꼴).
+ *    그래서 쪽을 실제로 그려 본 픽셀에서 단어의 잉크 위치를 직접 찾는다.
+ *      - 같은 줄의 토큰 수 == 잉크 덩어리 수 → 단어별로 정확히 대응
+ *      - 대응이 안 되면 → 줄 전체의 잉크 범위에 맞춰 추정 위치를 보정
+ * ===================================================================== */
+const ANALYSIS_W = 1600;
+const GAP_TRIES = [0.14, 0.18, 0.11, 0.22, 0.09, 0.27];   // 단어 사이 간격(글자 높이 대비)
+const DY_TRIES = [0, -0.18, 0.18, -0.35, 0.35];            // 텍스트 레이어가 세로로 어긋난 경우 대비
+
+function inkColumns(d, W, x0, x1, y0, y1) {
+  const n = x1 - x0;
+  const hist = new Uint32Array(16);
+  for (let y = y0; y < y1; y += 2) {
+    let i = (y * W + x0) * 4;
+    for (let x = 0; x < n; x++, i += 4) hist[(((d[i] * 3 + d[i + 1] * 6 + d[i + 2]) / 10) | 0) >> 4]++;
+  }
+  let mode = 0;
+  for (let k = 1; k < 16; k++) if (hist[k] > hist[mode]) mode = k;
+  const bg = mode * 16 + 8;
+  const cols = new Uint8Array(n);
+  for (let y = y0; y < y1; y++) {
+    let i = (y * W + x0) * 4;
+    for (let x = 0; x < n; x++, i += 4) {
+      if (cols[x]) continue;
+      const l = (d[i] * 3 + d[i + 1] * 6 + d[i + 2]) / 10;
+      if (l - bg > 55 || bg - l > 55) cols[x] = 1;
+    }
+  }
+  return cols;
+}
+
+function inkRuns(cols, x0) {
+  const runs = [];
+  let a = -1;
+  for (let x = 0; x < cols.length; x++) {
+    if (cols[x]) { if (a < 0) a = x; }
+    else if (a >= 0) { runs.push([x0 + a, x0 + x - 1]); a = -1; }
+  }
+  if (a >= 0) runs.push([x0 + a, x0 + cols.length - 1]);
+  return runs;
+}
+
+function mergeRuns(runs, thr) {
+  const out = [];
+  for (const r of runs) {
+    const last = out[out.length - 1];
+    if (last && r[0] - last[1] - 1 < thr) last[1] = r[1];
+    else out.push([r[0], r[1]]);
+  }
+  return out;
+}
+
+async function analyzePage(p, page) {
+  const sA = ANALYSIS_W / p.base.w;
+  const vp = page.getViewport({ scale: sA });
+  const W = Math.floor(vp.width), H = Math.floor(vp.height);
+  let data = null;
+  try {
+    const cv = document.createElement('canvas');
+    cv.width = W; cv.height = H;
+    const ctx = cv.getContext('2d', { alpha: false, willReadFrequently: true });
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    data = ctx.getImageData(0, 0, W, H).data;
+  } catch (e) { data = null; }
+
+  const boxes = new Array(p.tokEnd - p.tokStart).fill(null);
+
+  // item 기하 정보 (분석 해상도 기준)
+  const ents = [];
+  for (const item of p.items) {
+    if (!item.toks.length) continue;
+    const style = p.styles[item.fontName] || {};
+    const tx = pdfjsLib.Util.transform(vp.transform, item.transform);
+    const fh = Math.hypot(tx[2], tx[3]) || 1;
+    if (style.vertical || Math.abs(tx[1]) > fh * 0.02 || Math.abs(tx[2]) > fh * 0.02) continue;  // 회전/세로 글자는 제외
+    ents.push({ item, family: style.fontFamily || 'sans-serif', fh, x: tx[4], yb: tx[5], w: item.width * sA });
+  }
+
+  // 같은 기준선의 item 을 한 줄로 묶는다
+  ents.sort((a, b) => a.yb - b.yb);
+  const rows = [];
+  for (const e of ents) {
+    const r = rows[rows.length - 1];
+    if (r && Math.abs(e.yb - r.yb) <= 0.35 * Math.max(e.fh, r.fh)) {
+      r.ents.push(e);
+      if (e.item.toks.length > r.best.item.toks.length) r.best = e;
+    } else {
+      rows.push({ ents: [e], best: e, yb: e.yb, fh: e.fh });
+    }
+  }
+
+  let lastFont = '';
+  const measure = (str, fh, family) => {
+    const f = `${fh}px ${family}`;
+    if (f !== lastFont) { measureCtx.font = f; lastFont = f; }
+    return measureCtx.measureText(str).width;
+  };
+
+  for (const r of rows) {
+    r.ents.sort((a, b) => a.x - b.x);
+    const fh = r.best.fh, yb = r.best.yb;
+    const all = [];
+    for (const e of r.ents) for (const ti of e.item.toks) all.push({ ti, e });
+    // 하이픈만 따로 떨어진 토큰은 앞 단어와 같은 잉크 덩어리
+    const vis = all.filter((t, i) => !(i > 0 && HY_RE.test(tokens[t.ti].text) && tokens[all[i - 1].ti].sep === ''));
+    if (!vis.length) continue;
+
+    const minX = Math.min(...r.ents.map(e => e.x));
+    const maxR = Math.max(...r.ents.map(e => e.x + e.w));
+    const x0 = clamp(Math.floor(minX - 2 * fh), 0, W - 1);
+    const x1 = clamp(Math.ceil(maxR + 0.3 * (maxR - minX) + 2 * fh), x0 + 1, W);
+
+    let words = null, usedDy = 0, ink0 = null;
+    if (data) {
+      for (const dyk of DY_TRIES) {
+        const y0 = clamp(Math.round(yb + dyk * fh - 0.78 * fh), 0, H - 1);
+        const y1 = clamp(Math.round(yb + dyk * fh + 0.24 * fh), y0 + 1, H);
+        const runs = inkRuns(inkColumns(data, W, x0, x1, y0, y1), x0);
+        if (dyk === 0 && runs.length) ink0 = [runs[0][0], runs[runs.length - 1][1]];
+        if (!runs.length) continue;
+        for (const k of GAP_TRIES) {
+          const w = mergeRuns(runs, k * fh);
+          if (w.length === vis.length) { words = w; break; }
+        }
+        if (words) { usedDy = dyk; break; }
+      }
+    }
+
+    const yTop = yb + usedDy * fh - 0.8 * fh, bh = 1.04 * fh, base = yb + usedDy * fh;
+    const put = (ti, x, w) => {
+      boxes[ti - p.tokStart] = { x: (x - 1) / W, w: (w + 2) / W, y: yTop / H, h: bh / H, b: base / H, f: fh / W };
+    };
+
+    if (words) {
+      let wi = 0, prevBox = null;
+      for (let i = 0; i < all.length; i++) {
+        const t = all[i];
+        if (i > 0 && HY_RE.test(tokens[t.ti].text) && tokens[all[i - 1].ti].sep === '') {
+          boxes[t.ti - p.tokStart] = prevBox;       // 앞 단어의 박스를 공유
+          continue;
+        }
+        const [a, b] = words[wi++];
+        put(t.ti, a, b - a + 1);
+        prevBox = boxes[t.ti - p.tokStart];
+      }
+      continue;
+    }
+
+    // 폴백: item 기하로 추정한 뒤, 줄 전체의 잉크 범위에 맞춰 보정
+    const est = all.map(t => {
+      const e = t.e, tk = tokens[t.ti];
+      const full = measure(e.item.str, e.fh, e.family);
+      const sx = e.item.width > 0 && full > 0 ? (e.item.width * sA) / full : 1;
+      return {
+        ti: t.ti,
+        x: e.x + measure(e.item.str.slice(0, tk.s), e.fh, e.family) * sx,
+        w: measure(tk.text, e.fh, e.family) * sx,
+      };
+    });
+    let eMin = Infinity, eMax = -Infinity;
+    for (const t of est) { eMin = Math.min(eMin, t.x); eMax = Math.max(eMax, t.x + t.w); }
+    let scale = 1, shift = 0;
+    if (ink0 && eMax > eMin) {
+      const ratio = (ink0[1] - ink0[0]) / (eMax - eMin);
+      if (ratio > 0.6 && ratio < 1.6) { scale = ratio; shift = ink0[0] - eMin * scale; }
+    }
+    for (const t of est) put(t.ti, t.x * scale + shift, t.w * scale);
+  }
+  return boxes;
+}
+
+/* =====================================================================
+ * 3. 렌더링 (지연 렌더 + 하이라이트/텍스트 레이어)
  * ===================================================================== */
 const io = new IntersectionObserver(entries => {
   for (const e of entries) {
@@ -361,9 +541,20 @@ const io = new IntersectionObserver(entries => {
   }
 }, { rootMargin: '1500px 0px' });
 
+let zoomMode = store.get('zoomMode', 'width');          // width | page | pct
+let zoomPct = +store.get('zoomPct', 100) || 100;
+const ZOOM_PRESETS = [50, 75, 100, 125, 150, 200, 300];
+const PT_TO_PX = 96 / 72;
+
 function pageScale(p) {
-  const avail = Math.min(els.container.clientWidth - 24, 1100);
-  return Math.max(0.2, avail / p.base.w) * zoomSteps[zoomIdx];
+  const availW = Math.max(200, els.container.clientWidth - 24);
+  if (zoomMode === 'pct') return zoomPct / 100 * PT_TO_PX;
+  const byW = Math.min(availW, 1200) / p.base.w;
+  if (zoomMode === 'page') {
+    const availH = Math.max(200, window.innerHeight - chromeH() - 28);
+    return Math.max(0.1, Math.min(byW, availH / p.base.h));
+  }
+  return Math.max(0.1, byW);
 }
 
 function sizeWrapper(p) {
@@ -375,10 +566,11 @@ function sizeWrapper(p) {
 async function renderPage(p) {
   if (p.rendered || p.rendering || !pdfDoc) return;
   const myLoad = loadId, g = ++p.gen;
+  const stale = () => myLoad !== loadId || g !== p.gen;
   p.rendering = true;
   try {
     const page = await pdfDoc.getPage(p.n);
-    if (myLoad !== loadId || g !== p.gen) return;
+    if (stale()) return;
     const vp = page.getViewport({ scale: p.scale });
     const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
 
@@ -393,10 +585,16 @@ async function renderPage(p) {
       transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
     });
     await p.task.promise;
-    if (myLoad !== loadId || g !== p.gen) return;
+    if (stale()) return;
 
-    p.wrapper.replaceChildren(canvas, buildTextLayer(p, vp));
+    p.wrapper.replaceChildren(canvas);       // 그림을 먼저 보여 주고
     p.rendered = true;
+    if (!p.boxes) {                          // 단어 위치 분석은 쪽당 한 번만
+      const b = await analyzePage(p, page);
+      if (!p.boxes) p.boxes = b;
+      if (stale()) return;
+    }
+    buildLayers(p, vp);
     if (active >= 0) applyHighlight(pendingScroll);
   } catch (e) {
     if (!e || e.name !== 'RenderingCancelledException') console.error('render error', e);
@@ -413,57 +611,73 @@ function unrenderPage(p) {
   if (!p.rendered) return;
   for (let i = p.tokStart; i < p.tokEnd; i++) tokens[i].el = null;
   p.wrapper.replaceChildren();
+  p.hv = null;
   p.rendered = false;
 }
 
-function buildTextLayer(p, vp) {
-  const layer = document.createElement('div');
-  layer.className = 'tl';
+function buildLayers(p, vp) {
+  const VW = vp.width, VH = vp.height;
+  const hl = document.createElement('div');
+  hl.className = 'hl';
+  const frag = document.createDocumentFragment();
+  for (let k = 0; k < p.boxes.length; k++) {
+    const b = p.boxes[k];
+    if (!b) continue;
+    const d = document.createElement('div');
+    d.className = 'w';
+    d.style.cssText = `left:${b.x * VW}px;top:${b.y * VH}px;width:${b.w * VW}px;height:${b.h * VH}px`;
+    tokens[p.tokStart + k].el = d;
+    frag.append(d);
+  }
+  hl.append(frag);
+  p.hv = document.createElement('div');
+  p.hv.className = 'hv';
+  hl.append(p.hv);
+
+  // 선택/복사용 투명 텍스트 레이어: 단어 위치에 맞춰 줄 단위로 폭을 보정
+  const tl = document.createElement('div');
+  tl.className = 'tl';
   let lastFont = '';
   for (const item of p.items) {
     const style = p.styles[item.fontName] || {};
     const family = style.fontFamily || 'sans-serif';
-    const tx = pdfjsLib.Util.transform(vp.transform, item.transform);
-    let angle = Math.atan2(tx[1], tx[0]);
-    if (style.vertical) angle += Math.PI / 2;
-    const fh = Math.hypot(tx[2], tx[3]);
-    let asc = fh;
-    if (style.ascent) asc = style.ascent * fh;
-    else if (style.descent) asc = (1 + style.descent) * fh;
+    const bx = item.toks.map(ti => p.boxes[ti - p.tokStart]);
+    let ascR = 1;
+    if (style.ascent) ascR = style.ascent;
+    else if (style.descent) ascR = 1 + style.descent;
+
+    let text, left, top, fh, targetW, tf = '';
+    if (bx.length && bx.every(Boolean)) {
+      const t0 = tokens[item.toks[0]], t1 = tokens[item.toks[item.toks.length - 1]];
+      text = item.str.slice(t0.s, t1.e);
+      fh = bx[0].f * VW;
+      left = bx[0].x * VW;
+      top = bx[0].b * VH - ascR * fh;
+      targetW = (bx[bx.length - 1].x + bx[bx.length - 1].w - bx[0].x) * VW;
+    } else {
+      const tx = pdfjsLib.Util.transform(vp.transform, item.transform);
+      let angle = Math.atan2(tx[1], tx[0]);
+      if (style.vertical) angle += Math.PI / 2;
+      fh = Math.hypot(tx[2], tx[3]);
+      const asc = ascR * fh;
+      text = item.str;
+      left = angle === 0 ? tx[4] : tx[4] + asc * Math.sin(angle);
+      top = angle === 0 ? tx[5] - asc : tx[5] - asc * Math.cos(angle);
+      targetW = (style.vertical ? item.height : item.width) * vp.scale;
+      if (angle) tf = `rotate(${angle}rad) `;
+    }
+    const font = `${fh}px ${family}`;
+    if (font !== lastFont) { measureCtx.font = font; lastFont = font; }
+    const mw = measureCtx.measureText(text).width;
+    if (mw > 0 && targetW > 0) tf += `scaleX(${targetW / mw})`;
 
     const div = document.createElement('div');
     div.className = 'ti';
-    div.style.left = (angle === 0 ? tx[4] : tx[4] + asc * Math.sin(angle)) + 'px';
-    div.style.top = (angle === 0 ? tx[5] - asc : tx[5] - asc * Math.cos(angle)) + 'px';
-    div.style.fontSize = fh + 'px';
-    div.style.fontFamily = family;
-
-    let pos = 0;
-    for (const ti of item.toks) {
-      const t = tokens[ti];
-      if (t.s > pos) div.append(item.str.slice(pos, t.s));
-      const span = document.createElement('span');
-      span.className = 'w';
-      span.dataset.t = ti;
-      span.textContent = t.text;
-      t.el = span;
-      div.append(span);
-      pos = t.e;
-    }
-    if (pos < item.str.length) div.append(item.str.slice(pos));
-
-    // PDF 원본 글자 폭에 맞춰 가로 배율을 보정 → 하이라이트 박스가 실제 글자와 겹침
-    const targetW = (style.vertical ? item.height : item.width) * vp.scale;
-    const font = `${fh}px ${family}`;
-    if (font !== lastFont) { measureCtx.font = font; lastFont = font; }
-    const mw = measureCtx.measureText(item.str).width;
-    let tf = angle ? `rotate(${angle}rad)` : '';
-    if (mw > 0 && targetW > 0) tf += ` scaleX(${targetW / mw})`;
-    if (tf) div.style.transform = tf;
-
-    layer.append(div);
+    div.textContent = text;
+    div.style.cssText = `left:${left}px;top:${top}px;font-size:${fh}px;font-family:${family}` + (tf ? `;transform:${tf}` : '');
+    tl.append(div);
   }
-  return layer;
+  p.wrapper.append(hl, tl);
 }
 
 function applyLayout() {
@@ -473,14 +687,14 @@ function applyLayout() {
     if (p.rendered || p.rendering) unrenderPage(p);
     if (p.want) renderPage(p);
   }
+  topsValid = false;
   restoreAnchor(anchor);
-  els.zoomLabel.textContent = Math.round(zoomSteps[zoomIdx] * 100) + '%';
-  els.zoomOut.disabled = zoomIdx === 0;
-  els.zoomIn.disabled = zoomIdx === zoomSteps.length - 1;
+  updateZoomUI();
+  updateCurrentPage();
 }
 
 function captureAnchor() {
-  const top = els.toolbar.offsetHeight;
+  const top = chromeH();
   for (const p of pages) {
     const r = p.wrapper.getBoundingClientRect();
     if (r.bottom > top + 1) return { p, frac: (top - r.top) / (r.height || 1) };
@@ -489,13 +703,137 @@ function captureAnchor() {
 }
 function restoreAnchor(a) {
   if (!a) return;
-  const top = els.toolbar.offsetHeight;
   const r = a.p.wrapper.getBoundingClientRect();
-  window.scrollTo(0, window.scrollY + r.top + a.frac * r.height - top);
+  window.scrollTo(0, window.scrollY + r.top + a.frac * r.height - chromeH());
+}
+
+/* ---- 클릭 / 호버: 화면 좌표로 단어 박스를 찾는다 (DOM 요소에 의존하지 않음) ---- */
+function hitToken(p, e) {
+  if (!p.boxes || !p.rendered) return -1;
+  const r = p.wrapper.getBoundingClientRect();
+  const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
+  const tx = 3 / r.width, ty = 3 / r.height;
+  let best = -1, bestD = 1e9;
+  for (let k = 0; k < p.boxes.length; k++) {
+    const b = p.boxes[k];
+    if (!b) continue;
+    if (fy < b.y - ty || fy > b.y + b.h + ty) continue;
+    const dx = fx < b.x ? b.x - fx : fx > b.x + b.w ? fx - (b.x + b.w) : 0;
+    if (dx === 0) return p.tokStart + k;
+    const dpx = dx * r.width;
+    if (dpx < 10 && dpx < bestD) { bestD = dpx; best = p.tokStart + k; }
+  }
+  return best;
+}
+
+let hoverP = null, hoverRaf = 0, hoverEvt = null;
+function onHover() {
+  hoverRaf = 0;
+  const e = hoverEvt;
+  const pg = e.target.closest && e.target.closest('.page');
+  const p = pg ? pg._page : null;
+  if (hoverP && hoverP !== p && hoverP.hv) hoverP.hv.style.display = 'none';
+  hoverP = p;
+  if (!p) return;
+  const ti = hitToken(p, e);
+  p.wrapper.style.cursor = ti >= 0 ? 'pointer' : '';
+  if (!p.hv) return;
+  const b = ti >= 0 ? p.boxes[ti - p.tokStart] : null;
+  if (!b) { p.hv.style.display = 'none'; return; }
+  const r = p.wrapper.getBoundingClientRect();
+  p.hv.style.cssText = `display:block;left:${b.x * r.width}px;top:${b.y * r.height}px;width:${b.w * r.width}px;height:${b.h * r.height}px`;
 }
 
 /* =====================================================================
- * 3. 하이라이트 / 자동 스크롤
+ * 4. 쪽 이동 (현재 쪽 표시 / 번호 입력 이동)
+ * ===================================================================== */
+let pageTops = [];
+let topsValid = false;
+let curPage = 1;
+
+function ensureTops() {
+  if (topsValid && pageTops.length === pages.length) return;
+  const sy = window.scrollY;
+  pageTops = pages.map(p => p.wrapper.getBoundingClientRect().top + sy);
+  topsValid = true;
+}
+
+function pageAtScroll() {
+  if (!pages.length) return 1;
+  ensureTops();
+  const ref = window.scrollY + chromeH() + (window.innerHeight - chromeH()) * 0.3;
+  return floorIndex(pageTops, ref) + 1;
+}
+
+function updateCurrentPage() {
+  const n = pageAtScroll();
+  curPage = n;
+  if (document.activeElement !== els.pageInput) els.pageInput.value = pages.length ? String(n) : '';
+  els.pgPrev.disabled = !pages.length || n <= 1;
+  els.pgNext.disabled = !pages.length || n >= pages.length;
+}
+
+function goToPage(n) {
+  if (!pages.length) return;
+  n = clamp(Math.round(n) || 1, 1, pages.length);
+  topsValid = false;
+  ensureTops();
+  lastUserScroll = Date.now();            // 직접 이동했으니 잠시 자동 따라가기를 멈춘다
+  window.scrollTo(0, pageTops[n - 1] - chromeH() - 8);
+  updateCurrentPage();
+}
+
+let scrollRaf = 0;
+window.addEventListener('scroll', () => {
+  if (scrollRaf) return;
+  scrollRaf = requestAnimationFrame(() => { scrollRaf = 0; updateCurrentPage(); });
+}, { passive: true });
+
+els.pageInput.addEventListener('focus', () => els.pageInput.select());
+els.pageInput.addEventListener('input', () => { els.pageInput.value = els.pageInput.value.replace(/\D/g, '').slice(0, 6); });
+els.pageInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { goToPage(parseInt(els.pageInput.value, 10)); els.pageInput.blur(); }
+  else if (e.key === 'Escape') { els.pageInput.blur(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); goToPage(curPage - 1); els.pageInput.select(); }
+  else if (e.key === 'ArrowDown') { e.preventDefault(); goToPage(curPage + 1); els.pageInput.select(); }
+  e.stopPropagation();
+});
+els.pageInput.addEventListener('blur', () => { els.pageInput.value = pages.length ? String(curPage) : ''; });
+els.pgPrev.addEventListener('click', () => goToPage(curPage - 1));
+els.pgNext.addEventListener('click', () => goToPage(curPage + 1));
+
+/* ---- 배율 ---- */
+function effectivePct() {
+  return pages.length ? Math.round(pages[0].scale / PT_TO_PX * 100) : 100;
+}
+function updateZoomUI() {
+  els.zoomSel.value = zoomMode === 'pct' ? String(zoomPct) : zoomMode;
+  if (zoomMode === 'pct' && els.zoomSel.value !== String(zoomPct)) els.zoomSel.selectedIndex = -1;
+  els.zoomEff.textContent = pages.length ? effectivePct() + '%' : '';
+  els.zoomOut.disabled = els.zoomIn.disabled = !pages.length;
+}
+function setZoom(mode, pct) {
+  zoomMode = mode;
+  if (pct) zoomPct = pct;
+  store.set('zoomMode', zoomMode);
+  store.set('zoomPct', zoomPct);
+  applyLayout();
+}
+els.zoomSel.addEventListener('change', () => {
+  const v = els.zoomSel.value;
+  if (v === 'width' || v === 'page') setZoom(v); else setZoom('pct', +v);
+});
+els.zoomIn.addEventListener('click', () => {
+  const cur = effectivePct();
+  setZoom('pct', ZOOM_PRESETS.find(v => v > cur + 1) || ZOOM_PRESETS[ZOOM_PRESETS.length - 1]);
+});
+els.zoomOut.addEventListener('click', () => {
+  const cur = effectivePct();
+  setZoom('pct', [...ZOOM_PRESETS].reverse().find(v => v < cur - 1) || ZOOM_PRESETS[0]);
+});
+
+/* =====================================================================
+ * 5. 하이라이트 / 자동 스크롤
  * ===================================================================== */
 let active = -1;          // 현재 읽는 단어 토큰
 let sentIdx = null;       // 현재 문장(청크)의 토큰 목록
@@ -542,26 +880,26 @@ function applyHighlight(scroll) {
     if (scroll) keepVisible(t.el);
   } else if (scroll && Date.now() - lastUserScroll > 3000) {
     pendingScroll = true;
-    scrollToPage(t.p);
+    goToPageQuiet(t.p);
   }
 }
 
 function keepVisible(el) {
   if (Date.now() - lastUserScroll < 3000) return;
   const r = el.getBoundingClientRect();
-  const top = els.toolbar.offsetHeight + 24;
+  const top = chromeH() + 24;
   if (r.top < top || r.bottom > window.innerHeight * 0.8) {
     window.scrollTo({ top: window.scrollY + r.top - window.innerHeight * 0.35, behavior: 'smooth' });
   }
 }
 
-function scrollToPage(pi) {
+function goToPageQuiet(pi) {
   const r = pages[pi].wrapper.getBoundingClientRect();
-  window.scrollTo(0, window.scrollY + r.top - els.toolbar.offsetHeight - 8);
+  window.scrollTo(0, window.scrollY + r.top - chromeH() - 8);
 }
 
 function firstVisibleToken() {
-  const top = els.toolbar.offsetHeight + 4;
+  const top = chromeH() + 4;
   for (const p of pages) {
     if (p.wrapper.getBoundingClientRect().bottom <= top) continue;
     for (let i = p.tokStart; i < p.tokEnd; i++) {
@@ -574,7 +912,7 @@ function firstVisibleToken() {
 }
 
 /* =====================================================================
- * 4. 음성 재생
+ * 6. 음성 재생 (영어)
  *    - 문장(청크) 단위 utterance 를 1개 앞서 대기열에 넣어 끊김 없이 이어 읽음
  *    - 일시정지 = cancel + 위치 기억 (브라우저별 pause/resume 버그 회피)
  *    - gen 값으로 이전 utterance 의 늦은 이벤트를 무시
@@ -607,36 +945,24 @@ function buildChunk(from) {
     offs.push(text.length);
     text += t.speak + t.sep;
     if (t.end) { i++; break; }
-    if (text.length > MAX_SOFT && /[,;:、，；：)]$/.test(t.speak)) { i++; break; }
+    if (text.length > MAX_SOFT && /[,;:)]$/.test(t.speak)) { i++; break; }
     if (text.length > MAX_HARD) { i++; break; }
   }
   return { idx, offs, text, first: idx[0], next: i };
 }
 
-function detectLang(text) {
-  const n = re => (text.match(re) || []).length;
-  const ko = n(/[가-힣ᄀ-ᇿ㄰-㆏]/g);
-  const ja = n(/[぀-ヿ]/g);
-  const han = n(/[一-鿿]/g);
-  const lat = n(/[A-Za-z]/g);
-  const all = ko + ja + han + lat;
-  if (!all) return navigator.language || 'ko-KR';
-  if (ja >= all * 0.1) return 'ja-JP';
-  if (ko >= all * 0.2) return 'ko-KR';
-  if (han > lat) return 'zh-CN';
-  return 'en-US';
-}
-
 let voices = [];
-const voiceCache = new Map();
+let bestEnVoice;
 
 function loadVoices() {
   if (!synth) return;
-  voices = synth.getVoices().slice();
-  voiceCache.clear();
-  const cur = els.voice.value && els.voice.options.length > 1 ? els.voice.value : store.get('voice', 'auto');
+  const all = synth.getVoices().slice();
+  const en = all.filter(v => /^en([-_]|$)/i.test(v.lang));
+  voices = en.length ? en : all;
+  bestEnVoice = undefined;
+  const cur = els.voice.options.length > 1 ? els.voice.value : store.get('voice', 'auto');
   els.voice.length = 1;
-  const rank = v => /^ko/i.test(v.lang) ? 0 : /^en/i.test(v.lang) ? 1 : 2;
+  const rank = v => /^en[-_]US/i.test(v.lang) ? 0 : /^en[-_]GB/i.test(v.lang) ? 1 : 2;
   [...voices]
     .sort((a, b) => rank(a) - rank(b) || a.lang.localeCompare(b.lang) || a.name.localeCompare(b.name))
     .forEach(v => els.voice.add(new Option(
@@ -644,25 +970,18 @@ function loadVoices() {
   els.voice.value = [...els.voice.options].some(o => o.value === cur) ? cur : 'auto';
 }
 
-function bestVoice(lang) {
-  if (voiceCache.has(lang)) return voiceCache.get(lang);
-  const want = lang.replace('_', '-').toLowerCase();
-  const score = v => (v.lang.replace('_', '-').toLowerCase() === want ? 4 : 0) + (v.localService ? 2 : 0) + (v.default ? 1 : 0);
-  const v = voices
-    .filter(x => x.lang.slice(0, 2).toLowerCase() === want.slice(0, 2))
-    .sort((a, b) => score(b) - score(a))[0];
-  voiceCache.set(lang, v);
-  return v;
-}
-
-function chooseVoice(text) {
+function pickVoice() {
   const sel = els.voice.value;
   if (sel !== 'auto') {
     const v = voices.find(x => x.voiceURI === sel);
-    if (v) return { voice: v, lang: v.lang };
+    if (v) return v;
   }
-  const lang = detectLang(text);
-  return { voice: bestVoice(lang), lang };
+  if (bestEnVoice === undefined) {
+    // 단어 위치 이벤트를 주는 로컬 음성을 우선한다
+    const score = v => (/^en[-_]US/i.test(v.lang) ? 4 : 0) + (v.localService ? 2 : 0) + (v.default ? 1 : 0);
+    bestEnVoice = [...voices].sort((a, b) => score(b) - score(a))[0] || null;
+  }
+  return bestEnVoice;
 }
 
 function cancelSpeech() {
@@ -676,7 +995,7 @@ function cancelSpeech() {
 function startFrom(idx) {
   if (!tokens.length || !synth) return;
   cancelSpeech();
-  cursor = Math.max(0, Math.min(idx, tokens.length - 1));
+  cursor = clamp(idx, 0, tokens.length - 1);
   nextFrom = cursor;
   state = 'playing';
   noBoundaryNote = '';
@@ -708,9 +1027,9 @@ function pump(g) {
 
 function speakChunk(c, g) {
   const u = new SpeechSynthesisUtterance(c.text);
-  const { voice, lang } = chooseVoice(c.text);
+  const voice = pickVoice();
   if (voice) u.voice = voice;
-  u.lang = voice ? voice.lang : lang;
+  u.lang = voice ? voice.lang : 'en-US';
   u.rate = parseFloat(els.rate.value) || 1;
 
   let sawBoundary = false;
@@ -771,8 +1090,7 @@ function flagNoBoundary() {
 function showPlayStatus() {
   if (state !== 'playing') return;
   const t = tokens[active];
-  const pg = t ? t.p + 1 : 1;
-  setStatus(`재생 중 · ${pg} / ${pages.length} 쪽${noBoundaryNote}`);
+  setStatus(`재생 중 · ${t ? t.p + 1 : 1} / ${pages.length} 쪽${noBoundaryNote}`);
 }
 
 function pause() {
@@ -806,7 +1124,7 @@ function jumpSentence(dir) {
   let k = floorIndex(sentStarts, cursor);
   if (dir > 0) k++;
   else if (cursor <= sentStarts[k]) k--;
-  k = Math.max(0, Math.min(k, sentStarts.length - 1));
+  k = clamp(k, 0, sentStarts.length - 1);
   startFrom(sentStarts[k]);
 }
 
@@ -816,14 +1134,28 @@ function togglePlay() {
   else startFrom(cursor > 0 ? cursor : firstVisibleToken());
 }
 
+function locate() {
+  if (active < 0) return;
+  lastUserScroll = 0;
+  const t = tokens[active];
+  if (t.el) {
+    const r = t.el.getBoundingClientRect();
+    window.scrollTo({ top: window.scrollY + r.top - window.innerHeight * 0.35, behavior: 'smooth' });
+  } else {
+    goToPageQuiet(t.p);
+    pendingScroll = true;
+  }
+}
+
 function updateUI() {
   const ready = tokens.length > 0 && !!synth;
   els.play.disabled = els.stop.disabled = els.prev.disabled = els.next.disabled = !ready;
+  els.locate.disabled = !ready || active < 0;
   els.play.textContent = state === 'playing' ? '⏸ 일시정지' : state === 'paused' ? '▶ 이어서' : '▶ 재생';
 }
 
 /* =====================================================================
- * 5. PDF 로드
+ * 7. PDF 로드
  * ===================================================================== */
 function resetDocument() {
   cancelSpeech();
@@ -835,14 +1167,25 @@ function resetDocument() {
   tokens = [];
   sentStarts = [];
   pages.length = 0;
+  pageTops = [];
+  topsValid = false;
+  curPage = 1;
   els.progress.style.width = '0';
+  els.pageInput.value = '';
+  els.pageInput.disabled = true;
+  els.pageTotal.textContent = '/ –';
   if (pdfDoc) { pdfDoc.destroy().catch(() => {}); pdfDoc = null; }
   updateUI();
+  updateZoomUI();
+  updateCurrentPage();
 }
 
 async function loadPdf(file) {
   const id = ++loadId;
   resetDocument();
+  els.docName.textContent = file.name;
+  els.docName.title = file.name;
+  document.title = file.name + ' · PDF Reader';
   setStatus(`"${file.name}" 여는 중…`);
 
   let data;
@@ -865,6 +1208,8 @@ async function loadPdf(file) {
   }
   if (id !== loadId) { doc.destroy(); return; }
   pdfDoc = doc;
+  els.pageTotal.textContent = '/ ' + doc.numPages;
+  els.pageInput.disabled = false;
 
   try {
     for (let n = 1; n <= doc.numPages; n++) {
@@ -880,12 +1225,16 @@ async function loadPdf(file) {
         n, index: n - 1, wrapper, base: { w: vp1.width, h: vp1.height },
         items: ex.items, styles: tc.styles, tokStart: ex.first, tokEnd: ex.last,
         scale: 1, gen: 0, want: false, rendered: false, rendering: false, task: null,
+        boxes: null, hv: null,
       };
       wrapper._page = p;
       sizeWrapper(p);
       pages.push(p);
       els.container.append(wrapper);
       io.observe(wrapper);
+      topsValid = false;
+      if (n === 1) updateZoomUI();
+      updateCurrentPage();
 
       els.progress.style.width = (n / doc.numPages * 100) + '%';
       if (n === 1 || n % 10 === 0) setStatus(`텍스트 분석 중… ${n} / ${doc.numPages} 쪽`);
@@ -899,7 +1248,7 @@ async function loadPdf(file) {
   computeSentences();
   els.progress.style.width = '0';
   updateUI();
-  els.zoomLabel.textContent = Math.round(zoomSteps[zoomIdx] * 100) + '%';
+  updateZoomUI();
   if (!tokens.length) {
     setStatus('읽을 수 있는 텍스트가 없습니다. 스캔 이미지 PDF라면 먼저 OCR이 필요합니다.', true);
   } else {
@@ -908,7 +1257,7 @@ async function loadPdf(file) {
 }
 
 /* =====================================================================
- * 6. 이벤트 연결
+ * 8. 이벤트 연결
  * ===================================================================== */
 els.input.addEventListener('change', e => {
   const f = e.target.files[0];
@@ -920,21 +1269,22 @@ els.play.addEventListener('click', togglePlay);
 els.stop.addEventListener('click', stop);
 els.prev.addEventListener('click', () => jumpSentence(-1));
 els.next.addEventListener('click', () => jumpSentence(+1));
+els.locate.addEventListener('click', locate);
 
 function restartIfPlaying() { if (state === 'playing') startFrom(cursor); }
 els.rate.addEventListener('change', () => { store.set('rate', els.rate.value); restartIfPlaying(); });
 els.voice.addEventListener('change', () => { store.set('voice', els.voice.value); restartIfPlaying(); });
 els.edges.addEventListener('change', () => { store.set('edges', els.edges.checked ? '1' : '0'); restartIfPlaying(); });
 
-els.zoomIn.addEventListener('click', () => { zoomIdx = Math.min(zoomSteps.length - 1, zoomIdx + 1); store.set('zoom', zoomIdx); applyLayout(); });
-els.zoomOut.addEventListener('click', () => { zoomIdx = Math.max(0, zoomIdx - 1); store.set('zoom', zoomIdx); applyLayout(); });
-
 els.container.addEventListener('click', e => {
-  const w = e.target.closest && e.target.closest('.w');
-  if (!w) return;
-  if (String(window.getSelection()).trim()) return;     // 드래그 선택은 재생으로 취급하지 않음
-  startFrom(+w.dataset.t);
+  const pg = e.target.closest && e.target.closest('.page');
+  if (!pg) return;
+  if (String(window.getSelection()).trim()) return;      // 드래그 선택은 재생으로 취급하지 않음
+  const ti = hitToken(pg._page, e);
+  if (ti >= 0) startFrom(ti);
 });
+els.container.addEventListener('mousemove', e => { hoverEvt = e; if (!hoverRaf) hoverRaf = requestAnimationFrame(onHover); });
+els.container.addEventListener('mouseleave', () => { if (hoverP && hoverP.hv) hoverP.hv.style.display = 'none'; });
 
 document.addEventListener('keydown', e => {
   const tag = e.target.tagName;
@@ -943,6 +1293,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'ArrowRight') { e.preventDefault(); jumpSentence(+1); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); jumpSentence(-1); }
   else if (e.key === 'Escape') stop();
+  else if ((e.key === 'g' || e.key === 'G') && pages.length) { e.preventDefault(); els.pageInput.focus(); }
 });
 
 // 드래그 앤 드롭
@@ -958,12 +1309,15 @@ window.addEventListener('drop', e => {
   if (f && (f.type === 'application/pdf' || /\.pdf$/i.test(f.name))) loadPdf(f);
 });
 
-let resizeTimer = 0, lastW = els.container.clientWidth;
+let resizeTimer = 0, lastW = els.container.clientWidth, lastH = window.innerHeight;
 window.addEventListener('resize', () => {
+  topsValid = false;
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    const w = els.container.clientWidth;
-    if (w !== lastW && pages.length) { lastW = w; applyLayout(); }
+    const w = els.container.clientWidth, h = window.innerHeight;
+    const relayout = zoomMode === 'width' ? w !== lastW : zoomMode === 'page' ? (w !== lastW || h !== lastH) : false;
+    lastW = w; lastH = h;
+    if (relayout && pages.length) applyLayout(); else updateCurrentPage();
   }, 250);
 });
 
@@ -973,7 +1327,7 @@ window.addEventListener('pagehide', () => { if (synth) synth.cancel(); });
 els.rate.value = store.get('rate', '1');
 if (!els.rate.value) els.rate.value = '1';
 els.edges.checked = store.get('edges', '1') === '1';
-els.zoomLabel.textContent = Math.round(zoomSteps[zoomIdx] * 100) + '%';
+updateZoomUI();
 if (synth) {
   loadVoices();
   if (synth.addEventListener) synth.addEventListener('voiceschanged', loadVoices);
